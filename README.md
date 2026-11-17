@@ -28,4 +28,4 @@ Awai の分散 CI/CD アプリ。GitHub Actions に依存せず、複数の runn
 
 ## 次の作業(設計書 Phase P0)
 
-`tatara-core` の純粋ロジックを、負の対照つきテストと一緒に実装する。同一 DID 2 件で quorum 不成立、割れた verdict はハードエラー、CAS 欠落で完了拒否、ほか ADR-0001 の失敗モード各 1 ケース以上。
+`tatara-core` は P0 実装済み(packages/tatara-core/README.md)。次は P1(読み取り専用 viewer)。以下は P0 の受入だった内容。同一 DID 2 件で quorum 不成立、割れた verdict はハードエラー、CAS 欠落で完了拒否、ほか ADR-0001 の失敗モード各 1 ケース以上。
