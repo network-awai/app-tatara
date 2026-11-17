@@ -2,7 +2,7 @@
 
 RunRequest 正規化、replica lease、verdict の CID 再計算と quorum、CAS 存在検査つきの completion 受理、outbox、CD の ref・bundle・capability 検査。純粋ロジックのみ(`.cljc`)。I/O、署名、実行は持たない。
 
-状態: **P0・P1 のロジック実装済み(source)**。P1 の viewer UI と取得は未実装(下記)。受入の根拠は下のテストだけ。built candidate・実機・公開の確認はない。
+状態: **P0・P1・P2 のロジック実装済み(source)**。viewer UI・取得・実機 runner は未実装(下記)。受入の根拠は下のテストだけ。built candidate・実機・公開の確認はない。
 
 ## 実行
 
@@ -10,7 +10,7 @@ RunRequest 正規化、replica lease、verdict の CID 再計算と quorum、CAS
 bb test
 ```
 
-`bb`(Babashka)で手元の一回限りの確認として走らせる。CI の gate には入れていない。bb v1.12.218、2026-11-17 に 13 tests / 70 assertions、0 failures。
+`bb`(Babashka)で手元の一回限りの確認として走らせる。CI の gate には入れていない。bb v1.12.218、2026-11-17 に 19 tests / 87 assertions、0 failures。
 
 ## 失敗モードとテストの対応(ADR-0001)
 
@@ -43,3 +43,14 @@ bb test
 - viewer UI(`apps/tatara`)と run 状態の取得は未実装。
 - 「外部通信は宣言済み fetch のみ、拒否時に 0 リクエスト」は未検証。取得は共有 runtime `kotoba.app.client-runtime.v1` の broker を通す必要があるが、正本 `kotoba-client-runtime.js` を確認できていない。ブロッカーとして記録し、製品内に独自の同意ロジックは置かない。
 - ブラウザでの実行には cljs ビルドと同期 SHA-256 の選定が必要で、未着手。
+
+## P2: 有人 runner のフロー(`tatara.core.runner`)
+
+案 A(有人・T1)の runner 側オーケストレーション。sandbox・承認・送信は port として注入する。`validate-job` は pipeline が固定 CID にハッシュされること、step が argv の文字列ベクタのみであること、ネットワーク無しを検査する。`execute` は step を順に実行し、最初の非 0 終了で止め、宣言された artifact だけをホストが読んで CID を計算する(runner 申告の ID は使わない)。`run-job` は唯一の外部効果の直前に `approve` を呼び、拒否なら送信 0 回。
+
+テスト(`test/tatara/runner_test.clj`): 同一ジョブを別 DID の 2 runner が実行して verdict CID が一致し quorum 成立 / 出力が違えば hard error / 承認拒否で送信 0 / 失敗 step 以降は実行されない / artifact 欠落は失敗 / 不正な pipeline CID・shell 文字列・ネットワーク許可は拒否。承認を無条件にする変更と pipeline CID 検査を外す変更でテストが落ちることを確認した。
+
+**P2 の受入のうち未達**:
+- 実際の決定的 Wasm runner(desktop、T1)と、2 台の実機での実行は未実装。テストの sandbox は決定的な偽物で、Wasm 実行系ではない。
+- `approve` は port で、「ユーザーが表示された操作に直接与える信頼できる承認」は共有 runtime 側の責務。正本 `kotoba-client-runtime.js` が未確認のため、承認の実体は未実装。
+- 案 A が共有契約に収まるかの最終判断(設計書 Q2)は owner 未回答。
