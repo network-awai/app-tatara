@@ -1,5 +1,5 @@
 {:paths ["src" "test"]
  :tasks {test {:doc "Run tatara-core tests (local, one-off; not a CI gate)"
-               :requires ([clojure.test :as t] [tatara.core-test])
-               :task (let [r (t/run-tests 'tatara.core-test)]
+               :requires ([clojure.test :as t] [tatara.core-test] [tatara.verify-test])
+               :task (let [r (t/run-tests 'tatara.core-test 'tatara.verify-test)]
                        (System/exit (if (t/successful? r) 0 1)))}}}
