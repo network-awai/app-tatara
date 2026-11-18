@@ -7,4 +7,4 @@
  :tiers [:t2]
  :poll-ms 10000
  :network-enforcement :unshare
- :env {"NIX_REMOTE" "daemon"}}
+ :env {}}

@@ -23,5 +23,5 @@ provision:
       # Runner user without sudo. Steps run as this user.
       id tatara >/dev/null 2>&1 || useradd --create-home --shell /bin/bash tatara
       install -d -o tatara -g tatara -m 700 /var/lib/tatara /var/lib/tatara/work
-      # Nix (multi-user) and Babashka are installed by
-      # deploy/lima/provision.sh after their versions and digests are pinned.
+      # Babashka and Node 22 are installed by deploy/lima/provision.sh with
+      # pinned versions and digests. No Nix (the NixOS route is deprecated).

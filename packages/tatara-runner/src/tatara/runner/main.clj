@@ -2,7 +2,7 @@
   "bb run RUNNER.edn
   RUNNER: {:coordinator \"http://100.x.y.z:8790\" :identity \"/var/lib/tatara/runner.edn\"
            :work \"/var/lib/tatara/work\" :tiers [:t2] :poll-ms 10000
-           :network-enforcement :unshare :env {\"NIX_REMOTE\" \"daemon\"}}"
+           :network-enforcement :unshare :env {}}"
   (:require [clojure.edn :as edn]
             [tatara.coordinator.client :as cl]
             [tatara.coordinator.crypto :as crypto]
