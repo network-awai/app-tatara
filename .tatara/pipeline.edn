@@ -1,0 +1,5 @@
+{:tier :t2
+ :network :none
+ :timeout-seconds 1800
+ :steps [["bb" "ci"]]
+ :artifacts []}
