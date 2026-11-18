@@ -20,11 +20,17 @@
 (def default-max-snapshot-bytes (* 2 1024 1024 1024))
 (def max-pipeline-bytes 65536)
 
-(defn- api [{:keys [api token]} method path & [body]]
+(defn token-of
+  "The GitHub token: a lease from kagitaba-minter (:token-fn) or, for local
+  use only, a fixed :token."
+  [{:keys [token token-fn]}]
+  (if token-fn (token-fn) token))
+
+(defn- api [{:keys [api] :as gh} method path & [body]]
   (let [res (http/request {:method method :uri (str api path) :throw false
                            :headers (cond-> {"accept" "application/vnd.github+json"
                                              "x-github-api-version" "2022-11-28"
-                                             "authorization" (str "Bearer " token)}
+                                             "authorization" (str "Bearer " (token-of gh))}
                                       body (assoc "content-type" "application/json"))
                            :body (when body (json/generate-string body))})]
     {:status (:status res)
@@ -58,10 +64,10 @@
 (defn snapshot!
   "Fetch the commit tarball once and admit it to the CAS. Runners download it
   from the coordinator with their lease, so the GitHub token stays here."
-  [server {:keys [api token max-snapshot-bytes] :as gh} repo sha]
+  [server {:keys [api max-snapshot-bytes] :as gh} repo sha]
   (let [res (http/request {:method :get :uri (str api "/repos/" repo "/tarball/" sha) :throw false
                            :as :bytes :follow-redirects :normal
-                           :headers {"authorization" (str "Bearer " token)
+                           :headers {"authorization" (str "Bearer " (token-of gh))
                                      "accept" "application/vnd.github+json"}})
         data ^bytes (:body res)
         limit (or max-snapshot-bytes default-max-snapshot-bytes)]
