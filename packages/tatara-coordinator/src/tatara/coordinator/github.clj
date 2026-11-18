@@ -110,7 +110,7 @@
         t (Thread. ^Runnable
                    (fn []
                      (loop []
-                       (try (doseq [r (poll-once server gh) :when (or (:error r) (map? (:reply r)))]
+                       (try (doseq [r (poll-once server gh seen) :when (or (:error r) (map? (:reply r)))]
                               (println "poll" (pr-str r)))
                             (doseq [d (deliver-once server gh) :when (not (<= 200 (:status d) 299))]
                               (println "status delivery failed" (pr-str d)))
