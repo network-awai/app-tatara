@@ -1,0 +1,11 @@
+{:paths ["src" "test" "../tatara-core/src"]
+ :tasks {test {:doc "coordinator e2e and failure-mode tests (local)"
+               :requires ([clojure.test :as t] [tatara.coordinator.e2e-test])
+               :task (let [r (t/run-tests 'tatara.coordinator.e2e-test)]
+                       (System/exit (if (t/successful? r) 0 1)))}
+         serve {:doc "Run the coordinator: bb serve CONFIG.edn"
+                :requires ([tatara.coordinator.main :as m])
+                :task (apply m/-main *command-line-args*)}
+         keygen {:doc "Create a runner identity: bb keygen OUT.edn"
+                 :requires ([tatara.coordinator.crypto :as k])
+                 :task (k/write-identity! (first *command-line-args*))}}}

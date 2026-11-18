@@ -16,7 +16,7 @@ Awai の分散 CI/CD アプリ。GitHub Actions に依存せず、複数の runn
 |---|---|
 | `apps/tatara` | UI(閲覧・承認)。静的配信のみ |
 | `packages/tatara-core` | RunRequest / verdict / quorum / CD policy の純粋ロジック(`.cljc`) |
-| `packages/tatara-coordinator` | broker・outbox。end-user app とは別ロールのサービス |
+| `packages/tatara-coordinator` | broker・outbox・CAS・HTTP API（AWAI-3407、source 実装済み）。end-user app とは別ロールのサービス |
 | `packages/provider-murakumo` | provider port の Murakumo 実装 |
 | `packages/provider-awai-device` | Awai OS の Tauri / Android 端末での runner・承認 |
 
