@@ -38,6 +38,19 @@ host の試験は `cd src-tauri && cargo test`。`ANDROID_HOME`、`NDK_HOME`、`
 
 `npm test` は npm の依存を使うので、`.tatara/pipeline.edn`（VM の中、ネットワークなし）には入れていない。
 
+## fleet の mini への配備（AWAI-3411）
+
+`deploy/fleet/` を mini の `~/.tatara/android/deploy/` に置き、mini の上で実行する。SDK は `~/Library/Android/sdk` に、emulator、platform-tools、`system-images/android-35/default/arm64-v8a` だけを置く（Java と sdkmanager は不要。sudo も不要）。
+
+```bash
+sh ~/.tatara/android/deploy/setup-mini.sh       # AVD Tatara_Fleet と LaunchAgent を作り、起動を待つ
+sh ~/.tatara/android/deploy/provision-app.sh ~/.tatara/android/deploy/app-universal-debug.apk http://100.108.223.94:8790
+```
+
+- AVD は 2 vCPU、3 GiB、data 4 GiB、headless、port 5580。LaunchAgent `network.awai.tatara.android-emu` は `user/<uid>` に `LimitLoadToSessionType Background` で読み込む（SSH から入れるため）。KeepAlive、Nice 5
+- `provision-app.sh` は APK を入れ、coordinator の URL をアプリの設定（0600）に書き、端末の DID（公開の `device-did`）だけを読んで表示する。鍵のファイルは読まない
+- 既存の VM（Awai OS など）と jacob のエミュレータには触れない
+
 ## まだないこと
 
 - 決定的な Wasm ジョブ（T1）の実行と、coordinator からの T1 の lease
