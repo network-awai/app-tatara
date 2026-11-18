@@ -32,6 +32,12 @@ bb serve coordinator.edn     # 起動。設定は src/tatara/coordinator/main.cl
 
 `bb test` の `github-test` は偽の GitHub API に対して、run の作成、pipeline のない commit の除外、再 poll で重複しないこと、500 の後の再送、quorum の結果が `success` で届くこと、送信済みが再起動後も残ることを試験する。負の対照: 2xx 以外でも送信済みにする変更で、再送の試験が失敗することを確認した。本物の GitHub API には読み取りだけを試した（2026-11-18、network-awai-apex の head 5 件を取得。pipeline はまだない）。実際の status の書き込みは、runner の配備（AWAI-3411）の後に行う。
 
+## GitHub token の lease（AWAI-3459）
+
+設定の `:github` に `:lease {:url "http://MINTER:8795" :identity "lease-identity.edn" :owner "network-awai" :repositories [...] :permissions {...}}` を入れると、coordinator は長期の GitHub token を持たず、kagitaba-minter から 1 時間以内の installation token を lease として受け取る（期限の 5 分前に取り直す）。要求は coordinator の Ed25519 identity で署名し、token は coordinator の X25519 鍵へ封入されて届く。`bb lease-keygen lease-identity.edn` で identity を作り、表示された DID と X25519 公開鍵を minter の方針に登録する。`:token-env` の固定 token は手元の試験用として残す。
+
+`test/tatara/coordinator/lease_test.clj` は、kagitaba-minter の `lease_fixture` example が出力した fixture（試験用の鍵だけ）で、署名が Rust と一致すること、Rust が封じた lease を開けること、期限の改ざんを拒否すること、偽の minter に対する再利用と取り直し、拒否時の例外を確かめる。
+
 ## API
 
 | 呼び出し | 認証 | 内容 |
