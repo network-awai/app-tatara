@@ -120,7 +120,10 @@
       (let [run-id (:run-id job)
             entry {:runner (:runner sub) :verdict-cid (get-in adm [:ok :verdict-cid])
                    :result (get-in sub [:verdict :result])}
-            r2 (update r :entries conj entry)
+            ;; Keep the signed submission so a device can re-check the run
+            ;; without trusting this server (run-bundle, AWAI-3410).
+            r2 (-> r (update :entries conj entry)
+                   (update :submissions (fnil conj []) (select-keys sub [:runner :verdict :signed :signature])))
             q (v/quorum (:threshold r2) (:entries r2))
             r3 (cond-> r2 (not= :pending (:status q)) (assoc :status (:status q) :outcome q))
             act (when (not= :pending (:status q)) (outcome-action run-id r3 q))]
@@ -142,3 +145,21 @@
            :run-id run-id
            :replicas (->> (:jobs state) vals (filter #(= run-id (:run-id %)))
                           (map #(select-keys % [:index :status :runner])) (sort-by :index) vec))))
+
+(defn run-bundle
+  "Everything tatara.core.verify/verify-run needs to re-check a run on a
+  device: the request, threshold, allowlist, signed submissions, the artifact
+  objects they name, and what this server claims. read-object: cid -> value
+  or nil. Runs completed before submissions were kept have no entries and so
+  do not verify."
+  [{:keys [allow]} state run-id read-object]
+  (when-let [r (get-in state [:runs run-id])]
+    (let [subs (vec (:submissions r))
+          cids (distinct (for [s subs a (get-in s [:verdict :artifacts])] (:cid a)))
+          vcid (get-in r [:outcome :verdict-cid])]
+      {:request (get-in state [:requests run-id])
+       :threshold (:threshold r)
+       :allow (set allow)
+       :entries subs
+       :objects (into {} (keep (fn [c] (when-some [v (read-object c)] [c v]))) cids)
+       :claimed (cond-> {:status (:status r)} vcid (assoc :verdict-cid vcid))})))

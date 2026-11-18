@@ -128,6 +128,11 @@
           (and (= m :get) (= uri "/v1/runs"))
           (reply 200 (->> (:runs @state) keys (map #(svc/run-view @state %)) (sort-by :created) vec))
 
+          (and (= m :get) (str/starts-with? uri "/v1/runs/") (str/ends-with? uri "/bundle"))
+          (let [id (subs uri (count "/v1/runs/") (- (count uri) (count "/bundle")))]
+            (if-let [b (svc/run-bundle cfg @state id #(store/read-object root %))]
+              (reply 200 b) (reply 404 {:error :unknown-run})))
+
           (and (= m :get) (str/starts-with? uri "/v1/runs/"))
           (if-let [v (svc/run-view @state (subs uri (count "/v1/runs/")))]
             (reply 200 v) (reply 404 {:error :unknown-run}))
