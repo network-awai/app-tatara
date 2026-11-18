@@ -41,9 +41,13 @@
       (when-not (zero? (:exit r)) (throw (ex-info "snapshot extraction failed" {:err (:err r)}))))
     (str src)))
 
-(defn- wrap-network [argv network enforcement]
+(defn wrap-network
+  "A :network :none step runs in a fresh network namespace. Only loopback is
+  brought up inside it, so steps can still use localhost (test servers)."
+  [argv network enforcement]
   (if (and (= :none network) (= :unshare enforcement))
-    (into ["unshare" "--net" "--map-root-user" "--"] argv)
+    (into ["unshare" "--net" "--map-root-user" "--"
+           "sh" "-c" "ip link set lo up && exec \"$@\"" "tatara-step"] argv)
     argv))
 
 (defn run-steps

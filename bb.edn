@@ -1,0 +1,4 @@
+{:tasks {ci {:doc "Run every package's tests (the Tatara pipeline step)"
+             :task (doseq [p ["tatara-core" "tatara-coordinator" "tatara-runner"]]
+                     (println "==" p)
+                     (shell {:dir (str "packages/" p)} "bb test"))}}}

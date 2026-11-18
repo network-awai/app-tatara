@@ -94,3 +94,12 @@
     (is (= :wrong-tier (:error (core/validate (job (assoc ok-pipeline :tier :t1))))))
     (is (= :bad-artifact-path (:error (core/validate (job (assoc ok-pipeline :artifacts ["../etc/passwd"]))))))
     (is (= :pipeline-cid-mismatch (:error (core/validate (assoc (job ok-pipeline) :pipeline-cid "cid:sha256:00")))))))
+
+(deftest network-none-keeps-only-loopback
+  (testing "unshare wraps the argv unchanged after a fixed loopback bring-up"
+    (let [w (core/wrap-network ["bb" "ci"] :none :unshare)]
+      (is (= ["unshare" "--net" "--map-root-user" "--"] (subvec w 0 4)))
+      (is (= ["bb" "ci"] (subvec w (- (count w) 2))))))
+  (testing ":fetch and :none without enforcement are not wrapped"
+    (is (= ["bb" "ci"] (core/wrap-network ["bb" "ci"] :fetch :unshare)))
+    (is (= ["bb" "ci"] (core/wrap-network ["bb" "ci"] :none :none)))))
