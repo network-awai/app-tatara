@@ -70,3 +70,11 @@ runner の署名は、本文そのものに対する Ed25519 署名で、本文�
 負の対照: 状態の永続化を外すと再起動の試験が、署名の検証を外すと偽の署名の試験が失敗することを確認した。
 
 電源断の試験（OS ごと落ちる）、複数 coordinator、GitHub への実送信は対象外。
+
+## 常駐（macOS launchd、AWAI-3521）
+
+`deploy/launchd/` の `run-coordinator.sh` を `~/.tatara/coordinator/` に置き、`network.awai.tatara.coordinator.plist` の `@HOME@` を置き換えて `~/Library/LaunchAgents/` から `launchctl bootstrap gui/$(id -u) …` で読み込む。
+
+- admin token は `~/.tatara/coordinator/admin-token`（mode 600）から wrapper が読む。600 でなければ起動しない（exit 78）。plist に秘密は入れない
+- GitHub token は渡さない（`TATARA_GITHUB_TOKEN`、`GITHUB_TOKEN`、`GH_TOKEN` を消してから起動）。`coordinator.edn` の `:github :lease` で kagitaba-minter から 1 時間の token を受け取る
+- `KeepAlive` で異常終了しても再起動する
