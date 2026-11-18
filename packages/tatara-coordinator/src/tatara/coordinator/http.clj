@@ -141,3 +141,13 @@
     (assoc srv :server stop :port (hs/server-port stop))))
 
 (defn stop! [srv] (hs/server-stop! (:server srv)))
+
+(defn submit!
+  "In-process run submission (the GitHub poller). Persisted before returning."
+  [srv body]
+  (mutate! srv #(svc/submit-run (:cfg srv) % body ((:clock srv)))))
+
+(defn mark-delivered!
+  "Record that an outbox action reached its destination. Persisted."
+  [srv k]
+  (mutate! srv (fn [s] {:state (svc/mark-delivered s k) :reply {:ok true}})))
