@@ -17,6 +17,7 @@
   (:import (java.util Base64)))
 
 (def pipeline-path ".tatara/pipeline.edn")
+(def default-max-snapshot-bytes (* 2 1024 1024 1024))
 (def max-pipeline-bytes 65536)
 
 (defn- api [{:keys [api token]} method path & [body]]
@@ -54,6 +55,21 @@
                 (when-not (map? p) (throw (ex-info "pipeline is not a map" {:repo repo :sha sha})))
                 p)))))
 
+(defn snapshot!
+  "Fetch the commit tarball once and admit it to the CAS. Runners download it
+  from the coordinator with their lease, so the GitHub token stays here."
+  [server {:keys [api token max-snapshot-bytes] :as gh} repo sha]
+  (let [res (http/request {:method :get :uri (str api "/repos/" repo "/tarball/" sha) :throw false
+                           :as :bytes :follow-redirects :normal
+                           :headers {"authorization" (str "Bearer " token)
+                                     "accept" "application/vnd.github+json"}})
+        data ^bytes (:body res)
+        limit (or max-snapshot-bytes default-max-snapshot-bytes)]
+    (cond
+      (not= 200 (:status res)) (throw (ex-info "snapshot not readable" {:repo repo :sha sha :status (:status res)}))
+      (> (count data) limit) (throw (ex-info "snapshot too large" {:repo repo :sha sha :bytes (count data)}))
+      :else (srv/put-blob! server data))))
+
 (defn poll-once
   "seen: atom #{[repo sha]}. Returns [{:repo :sha :reply}|{:repo :error}]."
   [server gh seen]
@@ -69,7 +85,8 @@
                              {:repo repo :sha sha
                               :reply (srv/submit! server {:event {:forge "github" :repo repo :ref ref :sha sha
                                                                   :pipeline-cid (c/cid crypto/ctx p)}
-                                                          :pipeline p})}))))
+                                                          :pipeline p
+                                                          :snapshot (snapshot! server gh repo sha)})}))))
                   (catch clojure.lang.ExceptionInfo e [{:repo repo :error (ex-data e)}]))]
      result)))
 

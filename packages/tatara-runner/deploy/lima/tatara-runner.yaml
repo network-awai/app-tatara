@@ -1,0 +1,27 @@
+# Lima VM for one Tatara T2 runner on an Apple Silicon Mac mini.
+# Status: TEMPLATE, not qualified on the fleet yet (AWAI-3411).
+# Resource limits are the initial values from docs/fleet-ci-20261118.md §3.
+vmType: vz
+arch: aarch64
+cpus: 4
+memory: "6GiB"
+disk: "80GiB"
+images:
+  # Pin the exact image digest when qualifying (AWAI-3411). Until then the
+  # downloaded image is unverified and recorded as such.
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: aarch64
+mounts: []            # no host directories: the VM is the isolation boundary
+containerd:
+  system: false
+  user: false
+provision:
+  - mode: system
+    script: |
+      #!/bin/sh
+      set -eu
+      # Runner user without sudo. Steps run as this user.
+      id tatara >/dev/null 2>&1 || useradd --create-home --shell /bin/bash tatara
+      install -d -o tatara -g tatara -m 700 /var/lib/tatara /var/lib/tatara/work
+      # Nix (multi-user) and Babashka are installed by
+      # deploy/lima/provision.sh after their versions and digests are pinned.

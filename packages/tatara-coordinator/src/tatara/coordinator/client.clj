@@ -41,3 +41,15 @@
                  :verdict verdict :signed signed
                  :signature (crypto/sign identity (c/canonical signed))
                  :receipt-cid receipt-cid :snapshot-cid snapshot-cid))))
+
+(defn get-blob
+  "Fetch a CAS blob with the lease; the sha256 is checked before returning."
+  [{:keys [base identity]} job sha]
+  (let [res (http/get (str base "/v1/blob/" sha)
+                      {:headers {"x-tatara-job" (:job-id job) "x-tatara-runner" (:did identity)
+                                 "x-tatara-token" (:token job)}
+                       :as :bytes :throw false})]
+    (cond
+      (not= 200 (:status res)) {:status (:status res)}
+      (not= sha (crypto/sha256-bytes (:body res))) {:status 200 :error :blob-hash-mismatch}
+      :else {:status 200 :bytes (:body res)})))

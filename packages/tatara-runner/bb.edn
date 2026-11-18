@@ -1,0 +1,8 @@
+{:paths ["src" "test" "../tatara-core/src" "../tatara-coordinator/src" "../tatara-coordinator/test"]
+ :tasks {test {:doc "runner e2e against an in-process coordinator (local)"
+               :requires ([clojure.test :as t] [tatara.runner.runner-test])
+               :task (let [r (t/run-tests 'tatara.runner.runner-test)]
+                       (System/exit (if (t/successful? r) 0 1)))}
+         run {:doc "Run the runner daemon: bb run RUNNER.edn"
+              :requires ([tatara.runner.main :as m])
+              :task (apply m/-main *command-line-args*)}}}

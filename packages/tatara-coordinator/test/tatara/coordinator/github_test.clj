@@ -31,6 +31,9 @@
                       (if-let [t (get files sha)]
                         (ok {:content (.encodeToString (Base64/getMimeEncoder) (.getBytes ^String t "UTF-8"))})
                         {:status 404 :body "{}"}))
+                    (str/starts-with? uri (str "/repos/" repo "/tarball/"))
+                    {:status 200 :headers {"content-type" "application/gzip"}
+                     :body (str "tarball of " (last (str/split uri #"/")))}
                     (and (= :post request-method) (str/starts-with? uri (str "/repos/" repo "/statuses/")))
                     (if (pos? @fail-statuses)
                       (do (swap! fail-statuses dec) {:status 500 :body "{}"})
@@ -53,7 +56,8 @@
         (testing "commits with a pipeline become runs; others are skipped"
           (is (= 2 (count (filter #(map? (:reply %)) first-poll))))
           (is (some #(= :no-pipeline (:reply %)) first-poll))
-          (is (= 2 (count (:runs @(:state s)))))))
+          (is (= 2 (count (:runs @(:state s)))))
+          (is (every? #(= 64 (count (get-in % [:snapshot :sha256]))) (vals (:runs @(:state s)))))))
       (testing "a second poll does not resubmit"
         (is (empty? (gh/poll-once s g seen))))
       (testing "a failed status post stays pending and is retried"
