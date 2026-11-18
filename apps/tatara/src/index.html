@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tatara</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header><h1>Tatara</h1><p class="sub">fleet 機器（無人 runner の監督と検証）</p></header>
+  <main>
+    <section>
+      <h2>この端末</h2>
+      <p class="label">runner DID</p>
+      <code id="did">…</code>
+      <p class="note">coordinator の allowlist（<code>:allow</code>）にこの DID を足すと、この端末が runner として数えられる。秘密（GitHub の token、デプロイの資格）はこの端末に置かない。</p>
+    </section>
+    <section>
+      <h2>固定の run を検証する</h2>
+      <p class="note">coordinator が実際に出した run（runner 2 台）。端末の中で CID・署名・quorum を計算し直す。</p>
+      <div class="row">
+        <button id="fixture-verify">検証する</button>
+        <select id="tamper"></select>
+        <button id="fixture-tamper">改ざん版を検証する</button>
+      </div>
+      <div id="fixture-result" class="result" aria-live="polite"></div>
+    </section>
+    <section>
+      <h2>coordinator の run</h2>
+      <div class="row">
+        <input id="url" type="url" inputmode="url" placeholder="http://100.108.223.94:8790" aria-label="coordinator の URL">
+        <button id="save-url">保存</button>
+        <button id="load-runs">読み込む</button>
+      </div>
+      <div id="runs-error" class="result" aria-live="polite"></div>
+      <ul id="runs"></ul>
+    </section>
+  </main>
+  <script src="crypto.js"></script>
+  <script src="scittle.js"></script>
+  <script type="application/x-scittle" src="cljs/tatara/core/canonical.cljc"></script>
+  <script type="application/x-scittle" src="cljs/tatara/core/lease.cljc"></script>
+  <script type="application/x-scittle" src="cljs/tatara/core/verdict.cljc"></script>
+  <script type="application/x-scittle" src="cljs/tatara/core/verify.cljc"></script>
+  <script type="application/x-scittle" src="cljs/tatara/app/verify.cljs"></script>
+  <script type="application/x-scittle" src="cljs/tatara/app/ui.cljs"></script>
+</body>
+</html>

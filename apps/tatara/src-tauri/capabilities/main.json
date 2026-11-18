@@ -1,0 +1,1 @@
+{"identifier":"tatara-fleet-device","description":"Device identity, the coordinator URL, and read-only GETs of runs and run bundles from that coordinator. No secrets and no writes to the coordinator.","windows":["main"],"permissions":["allow-tatara-identity","allow-tatara-config-get","allow-tatara-config-set","allow-tatara-runs","allow-tatara-bundle"]}

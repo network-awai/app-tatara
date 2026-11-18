@@ -1,0 +1,21 @@
+{
+  "name": "@awai/tatara",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node scripts/build.mjs && nbb --classpath ../../packages/tatara-core/src:src test/verify_test.cljs",
+    "tauri": "tauri",
+    "build:android": "npm run build && tauri android build --debug --apk --target aarch64"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "3.0.0-alpha.6",
+    "esbuild": "0.28.2"
+  },
+  "dependencies": {
+    "@noble/curves": "2.4.0",
+    "@noble/hashes": "2.4.0",
+    "scittle": "0.8.33"
+  }
+}
