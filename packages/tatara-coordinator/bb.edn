@@ -1,7 +1,7 @@
 {:paths ["src" "test" "../tatara-core/src"]
  :tasks {test {:doc "coordinator e2e and failure-mode tests (local)"
-               :requires ([clojure.test :as t] [tatara.coordinator.e2e-test])
-               :task (let [r (t/run-tests 'tatara.coordinator.e2e-test)]
+               :requires ([clojure.test :as t] [tatara.coordinator.e2e-test] [tatara.coordinator.github-test])
+               :task (let [r (t/run-tests 'tatara.coordinator.e2e-test 'tatara.coordinator.github-test)]
                        (System/exit (if (t/successful? r) 0 1)))}
          serve {:doc "Run the coordinator: bb serve CONFIG.edn"
                 :requires ([tatara.coordinator.main :as m])

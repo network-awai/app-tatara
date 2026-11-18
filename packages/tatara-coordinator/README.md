@@ -2,7 +2,7 @@
 
 Tatara の制御面。run を受け、replica を runner に lease し、artifact と verdict を CAS に受け、quorum で結果を確定し、GitHub に返す送信を outbox に積む。end-user アプリではなく fleet のサービスである（設計書 Q1、`docs/fleet-ci-20261118.md`）。
 
-状態: **source**（AWAI-3407）。実機での運用、GitHub への送信（AWAI-3408）、Linux VM runner（AWAI-3409）は未実装。
+状態: **source**（AWAI-3407、AWAI-3408）。実機での運用と Linux VM runner（AWAI-3409）は未実装。
 
 ## 実行
 
@@ -21,6 +21,16 @@ bb serve coordinator.edn     # 起動。設定は src/tatara/coordinator/main.cl
 | `store` | 状態ファイル（一時ファイルに書き、fsync、rename、ディレクトリの fsync）と CAS |
 | `crypto` | SHA-256 と Ed25519 の runner 鍵 |
 | `client` | runner 側の呼び出し（T5 の runner も使う） |
+| `github` | GitHub の poller と commit status の送信（AWAI-3408） |
+
+## GitHub 連携（AWAI-3408）
+
+設定に `:github {:repos [...] :interval-ms 60000 :token-env "TATARA_GITHUB_TOKEN"}` を入れると、coordinator の中で 2 つの処理が回る。受信用の公開口（webhook）は作らない。token は coordinator の process の中だけで使い、runner には渡さない。
+
+- **poller**: 各 repo の default branch と開いている PR の head を読む。その commit に `.tatara/pipeline.edn` があれば run を作る。一度見た commit は、その process の中では読み直さない。
+- **送信**: outbox の commit status（context `tatara/ci`）を送る。GitHub が 2xx を返したときだけ送信済みにして永続化し、失敗したものは次の周回で再送する。
+
+`bb test` の `github-test` は偽の GitHub API に対して、run の作成、pipeline のない commit の除外、再 poll で重複しないこと、500 の後の再送、quorum の結果が `success` で届くこと、送信済みが再起動後も残ることを試験する。負の対照: 2xx 以外でも送信済みにする変更で、再送の試験が失敗することを確認した。本物の GitHub API には読み取りだけを試した（2026-11-18、network-awai-apex の head 5 件を取得。pipeline はまだない）。実際の status の書き込みは、runner の配備（AWAI-3411）の後に行う。
 
 ## API
 
@@ -38,7 +48,7 @@ runner の署名は、本文そのものに対する Ed25519 署名で、本文�
 
 ## 試験と ADR-0001 の失敗モード
 
-`bb test`（bb 1.12.218、2026-11-18）: 5 tests、27 assertions、0 failures。
+`bb test`（bb 1.12.218、2026-11-18）: 6 tests、39 assertions、0 failures（e2e と GitHub）。
 
 | 失敗モード | 試験 |
 |---|---|
