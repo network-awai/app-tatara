@@ -1,0 +1,15 @@
+{
+  "$schema": "https://schema.tauri.app/config/3",
+  "productName": "Tatara",
+  "version": "0.1.0",
+  "identifier": "network.awai.tatara",
+  "build": { "frontendDist": "../dist" },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [{ "label": "main", "title": "Tatara", "width": 560, "height": 860, "minWidth": 360, "minHeight": 480, "useHttpsScheme": true }],
+    "security": {
+      "csp": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
+    }
+  },
+  "bundle": { "active": true, "targets": ["app"], "icon": ["icons/icon.png"], "android": { "minSdkVersion": 35 } }
+}

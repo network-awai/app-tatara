@@ -1,0 +1,27 @@
+[package]
+name = "tatara-app"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+publish = false
+
+[lib]
+name = "tatara_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "=3.0.0-alpha.4", features = [] }
+
+[dependencies]
+tauri = { version = "=3.0.0-alpha.6", features = [] }
+tauri-runtime-wry = "=3.0.0-alpha.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ed25519-dalek = "3"
+getrandom = "0.3"
+base64 = "0.22"
+ureq = "3"
+zeroize = "1"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
