@@ -1,0 +1,10 @@
+;; /var/lib/tatara/runner.edn inside the VM. The identity file is created by
+;; `bb keygen /var/lib/tatara/identity.edn` (coordinator package) and its DID
+;; is added to the coordinator :allow set.
+{:coordinator "http://COORDINATOR-TAILNET-IP:8790"
+ :identity "/var/lib/tatara/identity.edn"
+ :work "/var/lib/tatara/work"
+ :tiers [:t2]
+ :poll-ms 10000
+ :network-enforcement :unshare
+ :env {"NIX_REMOTE" "daemon"}}

@@ -90,6 +90,18 @@
                         (reply 409 {:error :blob-hash-mismatch})
                         (do (store/put-blob! root sha data) (reply 200 {:ok true :sha sha}))))))
 
+          (and (= m :get) (str/starts-with? uri "/v1/blob/"))
+          (let [sha (subs uri (count "/v1/blob/"))
+                h (:headers req)
+                chk (svc/check-lease @state {:job-id (get h "x-tatara-job") :runner (get h "x-tatara-runner")
+                                             :token (get h "x-tatara-token")} now)]
+            (cond
+              (not (re-matches #"[0-9a-f]{64}" sha)) (reply 400 {:error :bad-sha})
+              (:error chk) (reply 403 chk)
+              (not (store/has-blob? root sha)) (reply 404 {:error :unknown-blob})
+              :else {:status 200 :headers {"content-type" "application/octet-stream"}
+                     :body (java.io.File. (str (store/blob-path root sha)))}))
+
           (and (= m :post) (= uri "/v1/object"))
           (let [b (signed-body req now)
                 chk (svc/check-lease @state (select-keys b [:job-id :runner :token]) now)
@@ -141,6 +153,13 @@
     (assoc srv :server stop :port (hs/server-port stop))))
 
 (defn stop! [srv] (hs/server-stop! (:server srv)))
+
+(defn put-blob!
+  "In-process blob admission (source snapshots fetched by the poller)."
+  [srv ^bytes data]
+  (let [sha (crypto/sha256-bytes data)]
+    (store/put-blob! (:root srv) sha data)
+    {:sha256 sha :size (count data)}))
 
 (defn submit!
   "In-process run submission (the GitHub poller). Persisted before returning."

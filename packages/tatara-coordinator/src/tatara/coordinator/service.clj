@@ -30,8 +30,9 @@
 
 (defn submit-run
   "event: {:forge :repo :ref :sha :pipeline-cid}; pipeline must hash to its CID.
+  snapshot (optional): {:sha256 :size} of the source tarball already in the CAS.
   Duplicate events of the same commit and pipeline return the existing run."
-  [{:keys [default-threshold]} state {:keys [event pipeline]} now]
+  [{:keys [default-threshold]} state {:keys [event pipeline snapshot]} now]
   (cond
     (not (map? pipeline)) {:state state :reply {:error :missing-pipeline}}
     (not= (:pipeline-cid event) (c/cid ctx pipeline)) {:state state :reply {:error :pipeline-cid-mismatch}}
@@ -45,7 +46,8 @@
             (let [threshold (max 1 (or (:quorum pipeline) default-threshold 2))
                   r {:repo (:repo event) :sha (:sha event) :ref (:ref event)
                      :pipeline pipeline :pipeline-cid (:pipeline-cid event)
-                     :threshold threshold :created now :status :pending :entries []}]
+                     :threshold threshold :created now :status :pending :entries []
+                     :snapshot snapshot}]
               {:state (-> state
                           (assoc :requests (:runs requests))
                           (assoc-in [:runs id] r)
@@ -73,7 +75,8 @@
               {:state (:state res)
                :reply {:job-id (:job-id res) :token token :ttl-ms ttl-ms :run-id id
                        :repo (:repo r) :sha (:sha r) :ref (:ref r)
-                       :pipeline (:pipeline r) :pipeline-cid (:pipeline-cid r)}})))))))
+                       :pipeline (:pipeline r) :pipeline-cid (:pipeline-cid r)
+                       :snapshot (:snapshot r)}})))))))
 
 (defn heartbeat [{:keys [ttl-ms]} state {:keys [job-id runner token]} now]
   (let [chk (lease/check ctx state {:job-id job-id :runner runner :token token :now now})]
