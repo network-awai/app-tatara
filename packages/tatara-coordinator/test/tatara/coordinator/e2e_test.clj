@@ -12,7 +12,8 @@
             [tatara.coordinator.client :as cl]
             [tatara.coordinator.crypto :as crypto]
             [tatara.coordinator.http :as srv]
-            [tatara.coordinator.service :as svc]))
+            [tatara.coordinator.service :as svc]
+            [tatara.core.verify :as vf]))
 
 (def now (atom 1700000000000))
 (defn clock [] @now)
@@ -140,4 +141,41 @@
       (testing "a runner without the run's tier gets no job"
         (submit s {:event event :pipeline pipeline})
         (is (= :no-job (get-in (cl/lease (cl/client (base s) a clock) [:t1]) [:body :error]))))
+      (finally (srv/stop! s)))))
+
+(def device-ctx
+  "What a device uses: real Ed25519 over the canonical signed part."
+  (assoc crypto/ctx :verify (fn [{:keys [runner signed signature]}]
+                              (crypto/verify runner (c/canonical signed) signature))))
+
+(defn- flip
+  "Change the first character. The last base64 character of a signature has
+  unused low bits, so changing it can decode to the same bytes."
+  [^String s] (str (if (= \x (first s)) "y" "x") (subs s 1)))
+
+(deftest bundle-reverifies-without-trusting-the-server
+  (let [s (start) ca (cl/client (base s) a clock) cb (cl/client (base s) b clock)]
+    (try
+      (let [run-id (get-in (submit s {:event event :pipeline pipeline}) [:body :run-id])
+            ja (:body (cl/lease ca [:t2])) jb (:body (cl/lease cb [:t2]))
+            _ (do-job ca ja "same bytes") _ (do-job cb jb "same bytes")
+            res (http/get (str (base s) "/v1/runs/" run-id "/bundle") {:throw false})
+            bundle (edn/read-string (:body res))
+            art (get-in bundle [:entries 0 :verdict :artifacts 0 :cid])]
+        (is (= 200 (:status res)))
+        (is (= 2 (count (:entries bundle))))
+        (is (contains? (:objects bundle) art))
+        (testing "the fetched bundle verifies with real signatures"
+          (let [r (vf/verify-run device-ctx bundle)]
+            (is (:ok? r) (pr-str (:failed r)))
+            (is (= :reached (get-in r [:quorum :status])))))
+        (testing "each tamper fails"
+          (doseq [[what b] {:signature (update-in bundle [:entries 1 :signature] flip)
+                            :result (assoc-in bundle [:entries 0 :verdict :result] :failed)
+                            :request-sha (update-in bundle [:request :sha] flip)
+                            :artifact-object (update-in bundle [:objects art :size] inc)
+                            :claim (assoc-in bundle [:claimed :status] :pending)
+                            :allowlist (update bundle :allow disj (:did b))}]
+            (is (not (:ok? (vf/verify-run device-ctx b))) (str what))))
+        (is (= 404 (:status (http/get (str (base s) "/v1/runs/cid:sha256:nope/bundle") {:throw false})))))
       (finally (srv/stop! s)))))
