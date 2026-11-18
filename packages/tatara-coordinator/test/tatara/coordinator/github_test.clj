@@ -83,3 +83,15 @@
           (is (empty? (svc/pending-actions @(:state s2))))
           (srv/stop! s2)))
       (finally ((:stop fake)) (fs/delete-tree root)))))
+
+(deftest the-background-loop-polls-and-delivers
+  (testing "start-loops! runs a poll and a delivery round (AWAI-3411: it once called poll-once with too few args)"
+    (let [root (str (fs/create-temp-dir {:prefix "tatara-gh-loop-"}))
+          posted (atom []) fake (fake-github {"main-sha" pipeline-text} (atom 0) posted)
+          s (srv/start! {:root root :allow #{}} {:clock e2e/clock})]
+      (try
+        (gh/start-loops! s {:api (:api fake) :token "t" :repos [repo] :interval-ms 600000})
+        (loop [i 0] (when (and (< i 100) (empty? @posted)) (Thread/sleep 100) (recur (inc i))))
+        (is (= 1 (count (:runs @(:state s)))))
+        (is (= ["pending"] (mapv :state @posted)))
+        (finally (srv/stop! s) ((:stop fake)) (fs/delete-tree root))))))
