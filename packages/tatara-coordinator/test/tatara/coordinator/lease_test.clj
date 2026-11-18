@@ -69,3 +69,19 @@
                             ((lease/token-provider {:url (:url m) :identity identity-fx :owner "network-awai"
                                                     :repositories ["awai-os"] :permissions {:contents "read"}}))))
       (finally ((:stop m))))))
+
+(deftest lease-request-is-plain-http1
+  (testing "no h2c upgrade header reaches the minter (AWAI-3459 live finding)"
+    (let [seen (atom nil)
+          s (hs/run-server (fn [{:keys [headers]}] (reset! seen headers)
+                             {:status 403 :body "{\"error\":\"repository not granted\"}"})
+                           {:port 0 :legacy-return-value? false})]
+      (try
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (lease/request-lease {:url (str "http://127.0.0.1:" (hs/server-port s)) :identity identity-fx
+                                           :owner "network-awai" :repositories ["app-tatara"]
+                                           :permissions {:contents "read"}} (System/currentTimeMillis))))
+        (is (some? @seen))
+        (is (nil? (get @seen "upgrade")))
+        (is (nil? (get @seen "http2-settings")))
+        (finally (hs/server-stop! s))))))

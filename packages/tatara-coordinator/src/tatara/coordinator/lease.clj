@@ -23,6 +23,13 @@
 (def format-id "kagitaba-lease/v1")
 (def refresh-before-ms (* 5 60 1000))
 
+;; HTTP/1.1 only: Java's HttpClient otherwise sends `Upgrade: h2c` on plain
+;; http, which kagitaba-minter's server did not expect (AWAI-3459). Timeouts
+;; keep a stuck minter from stalling the GitHub loop.
+(def ^:private client
+  (delay (http/client {:version :http1.1 :connect-timeout 10000})))
+(def request-timeout-ms 30000)
+
 (defn- b64 [^bytes b] (.encodeToString (.withoutPadding (Base64/getUrlEncoder)) b))
 (defn- unhex [^String s] (let [b (byte-array (quot (count s) 2))]
                            (dotimes [i (count b)] (aset b i (unchecked-byte (Integer/parseInt (subs s (* 2 i) (+ 2 (* 2 i))) 16))))
@@ -82,7 +89,8 @@
                                     :permissions permissions :ttl_s (or ttl-s 3600) :nonce (nonce) :ts now-ms})
         res (http/post (str url "/v1/lease") {:headers {"content-type" "application/json"
                                                          "x-kagitaba-signature" (crypto/sign identity body)}
-                                               :body body :throw false})
+                                               :body body :throw false
+                                               :client @client :timeout request-timeout-ms})
         out (try (json/parse-string (:body res) true) (catch Exception _ nil))]
     (when-not (= 200 (:status res))
       (throw (ex-info "lease refused" {:status (:status res) :error (:error out)})))
