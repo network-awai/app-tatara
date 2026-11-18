@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Headless AOSP API 35 arm64 emulator running the Tatara app on a fleet mini
+     (AWAI-3411). 2 vCPU, 3 GiB (config.ini). Replace @HOME@. No secrets. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>network.awai.tatara.android-emu</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@HOME@/Library/Android/sdk/emulator/emulator</string>
+    <string>-avd</string><string>Tatara_Fleet</string>
+    <string>-port</string><string>5580</string>
+    <string>-no-window</string><string>-no-audio</string><string>-no-boot-anim</string>
+    <string>-no-snapshot</string>
+    <string>-gpu</string><string>swiftshader_indirect</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>ANDROID_SDK_ROOT</key><string>@HOME@/Library/Android/sdk</string></dict>
+  <!-- Loaded over SSH into user/<uid>, which has no Aqua session. -->
+  <key>LimitLoadToSessionType</key><string>Background</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>LowPriorityIO</key><true/>
+  <key>Nice</key><integer>5</integer>
+  <key>StandardOutPath</key><string>@HOME@/.tatara/android-emu.log</string>
+  <key>StandardErrorPath</key><string>@HOME@/.tatara/android-emu.log</string>
+</dict>
+</plist>

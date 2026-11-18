@@ -54,7 +54,10 @@ pub fn load_or_create_identity(dir: &Path) -> Result<String, String> {
     }
     let sk = ed25519_dalek::SigningKey::from_bytes(&seed);
     seed.zeroize();
-    Ok(did_of(sk.verifying_key().as_bytes()))
+    let did = did_of(sk.verifying_key().as_bytes());
+    // Public; lets fleet provisioning read the DID without touching the key.
+    write_private(&dir.join("device-did"), did.as_bytes())?;
+    Ok(did)
 }
 
 /// Coordinator base URL: http(s), host and optional port only.
@@ -142,6 +145,7 @@ mod tests {
         let d2 = load_or_create_identity(&dir).unwrap();
         assert_eq!(d1, d2);
         assert!(d1.starts_with(DID_PREFIX));
+        assert_eq!(fs::read_to_string(dir.join("device-did")).unwrap(), d1);
         #[cfg(unix)]
         { use std::os::unix::fs::PermissionsExt;
           assert_eq!(fs::metadata(dir.join("device-key-v1")).unwrap().permissions().mode() & 0o777, 0o600); }
