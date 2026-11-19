@@ -8,7 +8,11 @@
                     :target-base \"https://tatara.example\"}}
   :github is optional. With :lease {:url \"http://MINTER:8795\" :identity \"lease-identity.edn\"
   :owner \"network-awai\" :repositories [...] :permissions {:contents \"read\" :statuses \"write\" :metadata \"read\" :pull_requests \"read\"}}
-  the coordinator leases short tokens from kagitaba-minter instead of holding one."
+  the coordinator leases short tokens from kagitaba-minter instead of holding one.
+  Optional merge gate (AWAI-3574): :github {:merge {:repos [\"network-awai/network-awai-apex\"]
+  :label \"tatara:merge\" :method \"squash\" :lease {... :repositories [...] :permissions
+  {:contents \"write\" :pull_requests \"read\" :metadata \"read\"}}}} squash-merges labelled PRs
+  whose exact head passed this coordinator's quorum. Without :merge nothing is merged."
   (:require [clojure.edn :as edn]
             [tatara.coordinator.github :as github]
             [tatara.coordinator.http :as http]
@@ -28,7 +32,12 @@
                  (let [token (some-> (:token-env g) System/getenv)]
                    (when-not token
                      (binding [*out* *err*] (println "github: token env" (:token-env g) "is empty")) (System/exit 78))
-                   (assoc g :token token)))))]
+                   (assoc g :token token)))))
+        ;; The merge gate gets its own lease (contents: write, pull_requests: read)
+        ;; scoped to its repositories, so the polling lease stays read-only (AWAI-3574).
+        gh (if-let [ml (get-in gh [:merge :lease])]
+             (assoc-in gh [:merge :token-fn] (lease/token-provider (assoc ml :identity (lease/read-identity (:identity ml)))))
+             gh)]
     (when gh (github/start-loops! srv gh) (println "github: polling" (count (:repos gh)) "repos"))
     (println "tatara-coordinator listening on" (or (:bind cfg) "127.0.0.1") (:port srv)
              "runners:" (count (:allow cfg)))

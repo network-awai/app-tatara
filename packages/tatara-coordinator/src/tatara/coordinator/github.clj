@@ -156,6 +156,63 @@
            (catch Exception e
              {:key k :repo (:repo a) :sha (:sha a) :error (failure :status e)})))))))
 
+;; ── merge gate (AWAI-3574) ──────────────────────────────────────────────────
+;; GitHub's branch protection is not available for the private repositories on
+;; the current plan, so Tatara itself merges: a PR that carries the opt-in label
+;; is squash-merged once THIS coordinator's own quorum passed for its exact head
+;; SHA. The decision reads the coordinator state, not GitHub's commit status,
+;; which anything with statuses:write could set. The merge call carries the SHA,
+;; so GitHub refuses it if the head moved after verification.
+
+(def default-merge-label "tatara:merge")
+
+(defn sha-verdict
+  "What this coordinator decided for repo@sha: :passed when at least one run
+  reached quorum on a passed verdict and none failed or hard-errored; :failed
+  when any run failed or hard-errored; :pending when runs exist but none
+  finished; :unknown when there is no run."
+  [state repo sha]
+  (let [runs (filter #(and (= repo (:repo %)) (= sha (:sha %))) (vals (:runs state)))
+        result (fn [r] (when (= :reached (:status r))
+                         (let [vc (get-in r [:outcome :verdict-cid])]
+                           (some #(when (= vc (:verdict-cid %)) (:result %)) (:entries r)))))]
+    (cond
+      (empty? runs) :unknown
+      (some #(or (= :hard-error (:status %)) (and (= :reached (:status %)) (not= :passed (result %)))) runs) :failed
+      (some #(= :passed (result %)) runs) :passed
+      :else :pending)))
+
+(defn merge-once
+  "For each repo in (:merge gh) :repos, merge the open, non-draft PRs that carry
+  the label and whose head this coordinator verified. Returns one entry per
+  labelled PR: {:repo :number :sha :outcome :merged|:waiting|:blocked|:not-mergeable|:error}."
+  [server gh]
+  (let [{:keys [repos label method] :or {label default-merge-label method "squash"}} (:merge gh)
+        mgh (merge gh (select-keys (:merge gh) [:token :token-fn]))
+        st (some-> (:state server) deref)]
+    (vec
+     (for [repo (distinct repos)
+           :let [pulls (try (api mgh :get (str "/repos/" repo "/pulls?state=open&per_page=100"))
+                            (catch Exception e {:error (failure :merge-list e)}))]
+           p (if (= 200 (:status pulls)) (:body pulls) [{::list-failed pulls}])
+           :let [failed (::list-failed p)]
+           :when (or failed (and (not (:draft p)) (some #(= label (:name %)) (:labels p))))]
+       (if failed
+         {:repo repo :outcome :error :error (or (:error failed) {:phase :merge-list :status (:status failed)})}
+         (let [n (:number p) sha (get-in p [:head :sha]) v (sha-verdict st repo sha)
+               base {:repo repo :number n :sha sha :verdict v}]
+           (case v
+             :passed (try
+                       (let [r (api mgh :put (str "/repos/" repo "/pulls/" n "/merge")
+                                    {:merge_method method :sha sha})]
+                         (cond (= 200 (:status r)) (assoc base :outcome :merged :merge-sha (get-in r [:body :sha]))
+                               (#{405 409} (:status r)) (assoc base :outcome :not-mergeable :status (:status r)
+                                                              :message (get-in r [:body :message]))
+                               :else (assoc base :outcome :error :status (:status r))))
+                       (catch Exception e (assoc base :outcome :error :error (failure :merge e))))
+             :failed (assoc base :outcome :blocked)
+             (assoc base :outcome :waiting))))))))
+
 (defn- start-worker! [label interval-ms tick]
   (doto (Thread. ^Runnable
                  (fn []
@@ -177,7 +234,8 @@
   [server gh]
   (let [interval-ms (:interval-ms gh 60000)
         poll-interval-ms (:poll-interval-ms gh interval-ms)]
-    (conj
+    (cond->
+     (conj
      (mapv (fn [repo]
              (let [seen (atom #{})]
                (start-worker! (str "tatara-github-poll-" repo) poll-interval-ms
@@ -188,4 +246,10 @@
      (start-worker! "tatara-github-delivery" interval-ms
                     #(doseq [{:keys [status error] :as d} (deliver-once server gh)
                              :when (or error (and status (not (<= 200 status 299))))]
-                       (println "status delivery failed" (pr-str d)))))))
+                       (println "status delivery failed" (pr-str d)))))
+     ;; Merge gate only when configured (AWAI-3574).
+     (:merge gh)
+     (conj (start-worker! "tatara-github-merge" (get-in gh [:merge :interval-ms] interval-ms)
+                          #(doseq [m (merge-once server gh)
+                                   :when (#{:merged :not-mergeable :error} (:outcome m))]
+                             (println "merge" (pr-str m))))))))
