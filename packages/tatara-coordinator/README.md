@@ -34,7 +34,7 @@ bb serve coordinator.edn     # 起動。設定は src/tatara/coordinator/main.cl
 
 ## GitHub token の lease（AWAI-3459）
 
-設定の `:github` に `:lease {:url "http://MINTER:8795" :identity "lease-identity.edn" :owner "network-awai" :repositories [...] :permissions {...}}` を入れると、coordinator は長期の GitHub token を持たず、kagitaba-minter から 1 時間以内の installation token を lease として受け取る（期限の 5 分前に取り直す）。要求は coordinator の Ed25519 identity で署名し、token は coordinator の X25519 鍵へ封入されて届く。`bb lease-keygen lease-identity.edn` で identity を作り、表示された DID と X25519 公開鍵を minter の方針に登録する。`:token-env` の固定 token は手元の試験用として残す。
+設定の `:github` に `:lease {:url "http://MINTER:8795" :identity "lease-identity.edn" :owner "network-awai" :repositories [...] :permissions {:contents "read" :statuses "write" :metadata "read" :pull_requests "read"}}` を入れると、coordinator は長期の GitHub token を持たず、kagitaba-minter から 1 時間以内の installation token を lease として受け取る（期限の 5 分前に取り直す）。要求は coordinator の Ed25519 identity で署名し、token は coordinator の X25519 鍵へ封入されて届く。`bb lease-keygen lease-identity.edn` で identity を作り、表示された DID と X25519 公開鍵を minter の方針に登録する。`:token-env` の固定 token は手元の試験用として残す。private repo では、開いている PR を読むのに `pull_requests: read` が要る。ないと PR の一覧が 403 になり、poll はその repo を error として報告する。
 
 `test/tatara/coordinator/lease_test.clj` は、kagitaba-minter の `lease_fixture` example が出力した fixture（試験用の鍵だけ）で、署名が Rust と一致すること、Rust が封じた lease を開けること、期限の改ざんを拒否すること、偽の minter に対する再利用と取り直し、拒否時の例外を確かめる。
 

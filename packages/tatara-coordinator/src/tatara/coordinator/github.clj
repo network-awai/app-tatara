@@ -44,9 +44,12 @@
         main (when branch (api gh :get (str "/repos/" repo "/commits/" branch)))
         pulls (api gh :get (str "/repos/" repo "/pulls?state=open&per_page=100"))]
     (when-not (= 200 (:status info)) (throw (ex-info "repo not readable" {:repo repo :status (:status info)})))
+    ;; A private repo needs pull_requests: read in the lease. Without it the
+    ;; PR list is 403; say so instead of silently testing main only (AWAI-3411).
+    (when-not (= 200 (:status pulls))
+      (throw (ex-info "pull requests not readable" {:repo repo :status (:status pulls)})))
     (concat (when (= 200 (:status main)) [{:ref (str "refs/heads/" branch) :sha (get-in main [:body :sha])}])
-            (when (= 200 (:status pulls))
-              (for [p (:body pulls)] {:ref (str "refs/pull/" (:number p) "/head") :sha (get-in p [:head :sha])})))))
+            (for [p (:body pulls)] {:ref (str "refs/pull/" (:number p) "/head") :sha (get-in p [:head :sha])}))))
 
 (defn pipeline-at
   "The pipeline map at sha, :absent, or throws on malformed content."

@@ -37,8 +37,8 @@ macOS では `unshare` がないため、試験は `:network-enforcement :none` 
 | ファイル | 内容 |
 |---|---|
 | `deploy/lima/tatara-runner.yaml` | Lima（vz、arm64、4 vCPU、6 GiB、80 GiB、host のマウントなし） |
-| `deploy/lima/provision.sh` | VM 内に Babashka を入れる（版と sha256 を引数で固定）。Nix は同じ方式で固定してから入れる |
+| `deploy/lima/provision.sh` | VM 内に Babashka と Node 22 を入れる（版と sha256 を引数で固定）。Nix は入れない（NixOS は deprecated、2026-11-19） |
 | `deploy/launchd/network.awai.tatara.runner-vm.plist` | mini の起動時に VM を立ち上げ、落ちたら再起動する |
 | `deploy/runner.example.edn` | runner の設定例 |
 
-VM のイメージと Nix の installer の digest は、まだ固定していない。fleet で資格を取るとき（AWAI-3411）に固定し、それまでは未検証として扱う。
+VM のイメージは Ubuntu 24.04 arm64 の cloud image を digest で固定している（AWAI-3411。SHASUMS は https で取得、GPG 署名は未確認）。Node は SHASUMS256 の GPG 署名を Node の release key で確かめた版を入れる。

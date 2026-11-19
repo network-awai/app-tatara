@@ -95,3 +95,21 @@
         (is (= 1 (count (:runs @(:state s)))))
         (is (= ["pending"] (mapv :state @posted)))
         (finally (srv/stop! s) ((:stop fake)) (fs/delete-tree root))))))
+
+(deftest unreadable-pull-requests-are-an-error-not-silence
+  (testing "a 403 on the PR list (private repo, lease without pull_requests: read) is reported"
+    (let [s (hs/run-server (fn [{:keys [uri]}]
+                             (cond (= uri (str "/repos/" repo)) {:status 200 :body (json/generate-string {:default_branch "main"})}
+                                   (= uri (str "/repos/" repo "/commits/main")) {:status 200 :body (json/generate-string {:sha "main-sha"})}
+                                   :else {:status 403 :body (json/generate-string {:message "Resource not accessible by integration"})}))
+                           {:port 0 :legacy-return-value? false})
+          g {:api (str "http://127.0.0.1:" (hs/server-port s)) :token "t" :repos [repo]}]
+      (try
+        (let [e (try (gh/heads g repo) nil (catch clojure.lang.ExceptionInfo e e))]
+          (is (some? e))
+          (is (= 403 (:status (ex-data e)))))
+        (let [srv (srv/start! {:root (str (fs/create-temp-dir {:prefix "tatara-gh-"})) :allow #{}} {:clock e2e/clock})]
+          (try (is (= [{:repo repo :error {:repo repo :status 403}}] (gh/poll-once srv g (atom #{}))))
+               (finally (srv/stop! srv))))
+        (finally (hs/server-stop! s))))))
+
