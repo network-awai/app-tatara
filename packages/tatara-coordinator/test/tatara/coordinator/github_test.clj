@@ -4,6 +4,7 @@
             [cheshire.core :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
+            [org.httpkit.client]
             [org.httpkit.server :as hs]
             [tatara.coordinator.client :as cl]
             [tatara.coordinator.crypto :as crypto]
@@ -114,6 +115,32 @@
         (is (= 1 (count (:runs @(:state s)))))
         (is (= ["pending"] (mapv :state @posted)))
         (finally (srv/stop! s) ((:stop fake)) (fs/delete-tree root))))))
+
+(deftest a-stalled-poll-does-not-hold-back-statuses
+  (testing "GitHub calls time out, and delivery still runs after a failed poll (AWAI-3542)"
+    (let [root (str (fs/create-temp-dir {:prefix "tatara-gh-stall-"}))
+          posted (atom []) stall (atom false)
+          fake (fake-github {"main-sha" pipeline-text} (atom 0) posted)
+          stalling (hs/run-server (fn [{:keys [uri] :as req}]
+                                    (if (and @stall (not (str/includes? uri "/statuses/")))
+                                      (do (Thread/sleep 3000) {:status 200 :body "{}"})
+                                      (let [r (clojure.core/deref (org.httpkit.client/request
+                                                                   {:url (str (:api fake) uri (when (:query-string req) (str "?" (:query-string req))))
+                                                                    :method (:request-method req)
+                                                                    :body (some-> (:body req) slurp)}))]
+                                        {:status (:status r) :headers {"content-type" "application/json"} :body (:body r)})))
+                                  {:port 0 :legacy-return-value? false})
+          g {:api (str "http://127.0.0.1:" (hs/server-port stalling)) :token "t" :repos [repo] :timeout-ms 500}
+          s (srv/start! {:root root :allow #{}} {:clock e2e/clock})]
+      (try
+        (gh/poll-once s g (atom #{}))
+        (is (= 1 (count (svc/pending-actions @(:state s)))))
+        (reset! stall true)
+        (is (thrown? Exception (gh/poll-once s g (atom #{}))) "a stalled call times out instead of blocking")
+        (gh/start-loops! s (assoc g :interval-ms 600000))
+        (loop [i 0] (when (and (< i 100) (empty? @posted)) (Thread/sleep 100) (recur (inc i))))
+        (is (= ["pending"] (mapv :state @posted)))
+        (finally (srv/stop! s) (hs/server-stop! stalling) ((:stop fake)) (fs/delete-tree root))))))
 
 (deftest unreadable-pull-requests-are-an-error-not-silence
   (testing "a 403 on the PR list (private repo, lease without pull_requests: read) is reported"
