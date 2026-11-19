@@ -6,12 +6,14 @@
 # No Nix: the NixOS route is deprecated (2026-11-19).
 set -eu
 BB_VERSION="$1"; BB_SHA256="$2"; NODE_VERSION="$3"; NODE_SHA256="$4"
-cd /tmp
+work_dir=$(mktemp -d /tmp/tatara-provision.XXXXXXXX)
+trap 'rm -rf -- "$work_dir"' 0
+trap 'exit 1' 1 2 15
+cd "$work_dir"
 curl -fsSLo bb.tgz "https://github.com/babashka/babashka/releases/download/v${BB_VERSION}/babashka-${BB_VERSION}-linux-aarch64-static.tar.gz"
 echo "${BB_SHA256}  bb.tgz" | sha256sum -c -
-tar -xzf bb.tgz -C /usr/local/bin bb
 curl -fsSLo node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-arm64.tar.xz"
 echo "${NODE_SHA256}  node.tar.xz" | sha256sum -c -
+tar -xzf bb.tgz -C /usr/local/bin bb
 tar -xJf node.tar.xz -C /usr/local --strip-components=1 --no-same-owner \
   --exclude=CHANGELOG.md --exclude=README.md --exclude=LICENSE
-rm -f bb.tgz node.tar.xz
