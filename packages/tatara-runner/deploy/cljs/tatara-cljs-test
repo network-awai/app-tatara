@@ -1,0 +1,6 @@
+#!/bin/sh
+# Run from the root of an app-itonami source snapshot.
+set -eu
+toolchain=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+export PATH="$toolchain/bin:$PATH"
+exec npm --prefix app test

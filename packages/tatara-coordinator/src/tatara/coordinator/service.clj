@@ -57,14 +57,18 @@
 
 (defn lease-job
   "Give the runner the first claimable replica of the oldest pending run whose
-  tier it supports. token is a fresh random bearer secret; only its hash is kept."
-  [{:keys [allow ttl-ms]} state {:keys [runner tiers]} token now]
+  tier and toolchain it supports. Toolchains are assigned by the operator."
+  [{:keys [allow ttl-ms runner-toolchains]} state {:keys [runner tiers]} token now]
   (if-not (contains? allow runner)
     {:state state :reply {:error :runner-not-allowed}}
     (let [tiers (set tiers)
+          toolchains (get runner-toolchains runner #{})
           candidates (->> (:runs state)
                           (filter (fn [[_ r]] (and (= :pending (:status r))
-                                                   (contains? tiers (get-in r [:pipeline :tier] :t2)))))
+                                                   (contains? tiers (get-in r [:pipeline :tier] :t2))
+                                                   (if-let [toolchain (get-in r [:pipeline :toolchain])]
+                                                     (contains? toolchains toolchain)
+                                                     true))))
                           (sort-by (fn [[id r]] [(:created r) id])))]
       (loop [[[id r] & more] candidates]
         (if-not id

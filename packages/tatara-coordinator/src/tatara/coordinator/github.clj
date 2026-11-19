@@ -175,11 +175,12 @@
   "Poll each configured repository independently and drain the outbox on a
   separate daemon thread. Return the worker threads."
   [server gh]
-  (let [interval-ms (:interval-ms gh 60000)]
+  (let [interval-ms (:interval-ms gh 60000)
+        poll-interval-ms (:poll-interval-ms gh interval-ms)]
     (conj
      (mapv (fn [repo]
              (let [seen (atom #{})]
-               (start-worker! (str "tatara-github-poll-" repo) interval-ms
+               (start-worker! (str "tatara-github-poll-" repo) poll-interval-ms
                               #(doseq [r (poll-repo server gh seen repo)
                                        :when (or (:error r) (map? (:reply r)))]
                                  (println "poll" (pr-str r))))))
