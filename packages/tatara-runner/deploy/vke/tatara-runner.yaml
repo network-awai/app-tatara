@@ -81,7 +81,7 @@ spec:
           command: ["/bin/sh", "/boot/boot.sh"]
           env:
             - {name: POD_NAME, valueFrom: {fieldRef: {fieldPath: metadata.name}}}
-            - {name: TATARA_REV, value: "9b62b41a71eed13ac4398f2ffc8b28ee1250e82e"}
+            - {name: TATARA_REV, value: "6c3b3aac61023e87fbe93797c4304621169651a5"}
             - {name: COORDINATOR, value: "http://100.108.223.94:8790"}
             - {name: NETWORK_ENFORCEMENT, value: ":unshare"}
           securityContext: {capabilities: {add: [SYS_ADMIN]}}

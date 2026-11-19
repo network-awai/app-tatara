@@ -7,6 +7,7 @@ next to the Mac mini runners and take part in the same quorum.
 | File | Role |
 |---|---|
 | `tatara-runner.yaml` | ConfigMap (boot script) and StatefulSet `tatara-runner` in namespace `tatara` |
+| `scaler.yaml` | Queue-based scaler (Deployment `tatara-scaler`, RBAC limited to `statefulsets/scale` of `tatara-runner`) |
 | `provision-host.sh` | Same pinned tools for a plain Linux x86_64 host with systemd, if a VM is used instead |
 
 ## How it works
@@ -26,7 +27,15 @@ The runner reaches the coordinator at `http://100.108.223.94:8790`. Steps run wi
 - nbb 1.4.208 (the npm integrity pinned in network-awai-apex `ci/otehon-nbb.nix`);
 - app-tatara at `TATARA_REV`.
 
-It then runs `bb run runner.edn`.
+It also installs `iproute2`: `:unshare` steps bring up loopback with `ip link set lo up`, and without it every
+`:network :none` step fails. It then runs `bb run runner.edn`.
+
+**Scaling.** `tatara-scaler` (`bb scale`, `tatara.runner.scaler`) polls the coordinator's `GET /v1/runs` every 30 s.
+- Demand is the number of replica jobs that are `:queued` or `:leased` in `:pending` runs.
+- It scales up at once, to that number and at most 3.
+- It scales down to the minimum (0) only after 600 s with no open job, so no pod is removed while it holds a lease.
+- A failed coordinator or API call leaves the count unchanged.
+- The node pool autoscaler adds or removes nodes to fit the pods.
 
 ## Set up
 
@@ -37,7 +46,7 @@ kubectl -n tatara create secret generic tailscale-auth --from-literal=TS_AUTHKEY
 # One identity per ordinal (bb keygen in packages/tatara-coordinator); add each DID to the coordinator :allow set:
 kubectl -n tatara create secret generic tatara-runner-identity-0 --from-file=identity.edn=<file>
 kubectl apply -f tatara-runner.yaml
-kubectl -n tatara scale statefulset tatara-runner --replicas=<1..3>
+kubectl apply -f scaler.yaml
 ```
 
 The VKE node pool `tatara-runners` (vc2-4c-8gb) has the autoscaler set to 1–3 nodes. Each runner
@@ -45,7 +54,8 @@ requests 1.5 CPU and 3 GiB, so two fit on a node; a third replica brings up a se
 
 ## State on 2026-11-19
 
-- Pod 0 joined the tailnet and polls the coordinator. It was refused with `runner-not-allowed` until its
-  DID was added; after that the coordinator listed 6 runners.
-- Taking part in a verdict is shown on the next commit after that change (see AWAI-3542).
-- Replica count is set by hand. Scaling on the coordinator's queue (for example KEDA) is not done yet.
+- Pod 0 joined the tailnet and polls the coordinator. Its DID was added to `:allow`.
+- Its first verdict, on app-tatara main `3a5b11fe`, was `:failed` against the mini's `:passed` (split threshold).
+  The cause was the missing `ip` command (above), fixed in #19.
+- After #19, the scaler went from 0 to 1 replica within one poll of the run for `6c3b3aac`. The Mac minis had
+  already taken both jobs before the pod finished booting (about 1–2 min).

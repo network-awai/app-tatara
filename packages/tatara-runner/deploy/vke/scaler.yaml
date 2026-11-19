@@ -73,7 +73,7 @@ spec:
           image: ubuntu:24.04
           command: ["/bin/sh", "/boot/boot.sh"]
           env:
-            - {name: TATARA_REV, value: "SCALER_REV"}
+            - {name: TATARA_REV, value: "6c3b3aac61023e87fbe93797c4304621169651a5"}
             - {name: COORDINATOR, value: "http://100.108.223.94:8790"}
             - {name: MIN_REPLICAS, value: "0"}
             - {name: MAX_REPLICAS, value: "3"}
