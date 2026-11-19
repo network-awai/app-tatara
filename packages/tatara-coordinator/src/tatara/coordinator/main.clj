@@ -7,7 +7,7 @@
                     :token-env \"TATARA_GITHUB_TOKEN\" :api \"https://api.github.com\"
                     :target-base \"https://tatara.example\"}}
   :github is optional. With :lease {:url \"http://MINTER:8795\" :identity \"lease-identity.edn\"
-  :owner \"network-awai\" :repositories [...] :permissions {:contents \"read\" :statuses \"write\"}}
+  :owner \"network-awai\" :repositories [...] :permissions {:contents \"read\" :statuses \"write\" :metadata \"read\" :pull_requests \"read\"}}
   the coordinator leases short tokens from kagitaba-minter instead of holding one."
   (:require [clojure.edn :as edn]
             [tatara.coordinator.github :as github]
