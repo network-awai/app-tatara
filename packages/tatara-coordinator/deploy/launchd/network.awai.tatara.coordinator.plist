@@ -12,7 +12,8 @@
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
-  <key>ProcessType</key><string>Background</string>
+  <!-- The coordinator serves runner leases and GitHub status delivery. -->
+  <key>ProcessType</key><string>Standard</string>
   <key>StandardOutPath</key><string>@HOME@/.tatara/coordinator/logs/coordinator.log</string>
   <key>StandardErrorPath</key><string>@HOME@/.tatara/coordinator/logs/coordinator.log</string>
 </dict>
