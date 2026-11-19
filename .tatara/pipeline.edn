@@ -2,7 +2,7 @@
 {:tier :t2
  :toolchain :mac-mini-fleet-qualification
  :network :none
- :quorum 5
+ :quorum 7
  :timeout-seconds 300
  :steps [["bb" "ci"]]
  :artifacts []}
