@@ -1,6 +1,6 @@
 ;; Temporary fleet qualification branch. The normal main-branch quorum stays independent.
 {:tier :t2
- :toolchain :mac-mini-fleet-validation-9
+ :toolchain :mac-mini-fleet-validation-10
  :network :none
  :quorum 2
  :timeout-seconds 300
