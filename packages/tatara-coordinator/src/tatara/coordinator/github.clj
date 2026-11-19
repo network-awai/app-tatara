@@ -20,6 +20,14 @@
 (def default-max-snapshot-bytes (* 2 1024 1024 1024))
 (def max-pipeline-bytes 65536)
 
+;; Every GitHub call has a connect and a request timeout. Without them one
+;; stalled connection blocked the poll/delivery thread, so no status was sent
+;; (AWAI-3542, 2026-11-19).
+(def ^:private client
+  (delay (http/client {:connect-timeout 10000 :follow-redirects :normal})))
+(def api-timeout-ms 30000)
+(def snapshot-timeout-ms 600000)
+
 (defn token-of
   "The GitHub token: a lease from kagitaba-minter (:token-fn) or, for local
   use only, a fixed :token."
@@ -28,6 +36,7 @@
 
 (defn- api [{:keys [api] :as gh} method path & [body]]
   (let [res (http/request {:method method :uri (str api path) :throw false
+                           :client @client :timeout (:timeout-ms gh api-timeout-ms)
                            :headers (cond-> {"accept" "application/vnd.github+json"
                                              "x-github-api-version" "2022-11-28"
                                              "authorization" (str "Bearer " (token-of gh))}
@@ -69,7 +78,7 @@
   from the coordinator with their lease, so the GitHub token stays here."
   [server {:keys [api max-snapshot-bytes] :as gh} repo sha]
   (let [res (http/request {:method :get :uri (str api "/repos/" repo "/tarball/" sha) :throw false
-                           :as :bytes :follow-redirects :normal
+                           :as :bytes :client @client :timeout snapshot-timeout-ms
                            :headers {"authorization" (str "Bearer " (token-of gh))
                                      "accept" "application/vnd.github+json"}})
         data ^bytes (:body res)
@@ -134,11 +143,13 @@
         t (Thread. ^Runnable
                    (fn []
                      (loop []
+                       ;; Poll and delivery fail separately: a poll error must not hold back statuses.
                        (try (doseq [r (poll-once server gh seen) :when (or (:error r) (map? (:reply r)))]
                               (println "poll" (pr-str r)))
-                            (doseq [d (deliver-once server gh) :when (and (:status d) (not (<= 200 (:status d) 299)))]
+                            (catch Exception e (println "github poll error" (.getMessage e))))
+                       (try (doseq [d (deliver-once server gh) :when (and (:status d) (not (<= 200 (:status d) 299)))]
                               (println "status delivery failed" (pr-str d)))
-                            (catch Exception e (println "github loop error" (.getMessage e))))
+                            (catch Exception e (println "github delivery error" (.getMessage e))))
                        (Thread/sleep (long (:interval-ms gh 60000)))
                        (recur))))]
     (.setDaemon t true) (.start t) t))
