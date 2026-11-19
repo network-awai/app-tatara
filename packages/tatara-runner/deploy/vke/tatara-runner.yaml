@@ -4,7 +4,9 @@
 # - Sidecar tailscale joins the tailnet (ephemeral, auth key Secret tailscale-auth) so the runner reaches
 #   the coordinator at 100.108.223.94:8790.
 # - Container runner installs pinned Node 22.23.5, Babashka 1.12.218, nbb 1.4.208 (digests checked) and
-#   app-tatara at a fixed commit, then runs `bb run runner.edn`.
+#   app-tatara at a fixed commit, then runs `bb run runner.edn`. iproute2 is needed: :unshare steps
+#   bring up loopback with `ip link set lo up` (without it every :network :none step fails).
+# - The replica count is set by the queue-based scaler (scaler.yaml); it starts at 0.
 apiVersion: v1
 kind: ConfigMap
 metadata: {name: tatara-runner-boot, namespace: tatara}
@@ -14,7 +16,7 @@ data:
     set -eu
     ORD=${POD_NAME##*-}
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -q >/dev/null && apt-get install -y -q git curl xz-utils ca-certificates util-linux openssl python3 >/dev/null
+    apt-get update -q >/dev/null && apt-get install -y -q git curl xz-utils ca-certificates util-linux iproute2 openssl python3 >/dev/null
     T=$(mktemp -d); cd "$T"
     check256() { echo "$2  $1" | sha256sum -c - >/dev/null || { echo "digest mismatch: $1" >&2; exit 3; }; }
     check512() { [ "$(openssl dgst -sha512 -binary "$1" | base64 -w0)" = "$2" ] || { echo "digest mismatch: $1" >&2; exit 3; }; }
@@ -51,7 +53,7 @@ kind: StatefulSet
 metadata: {name: tatara-runner, namespace: tatara}
 spec:
   serviceName: tatara-runner
-  replicas: 1
+  replicas: 0
   podManagementPolicy: Parallel
   selector: {matchLabels: {app: tatara-runner}}
   template:
