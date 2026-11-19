@@ -38,6 +38,18 @@ bb serve coordinator.edn     # 起動。設定は src/tatara/coordinator/main.cl
 
 `test/tatara/coordinator/lease_test.clj` は、kagitaba-minter の `lease_fixture` example が出力した fixture（試験用の鍵だけ）で、署名が Rust と一致すること、Rust が封じた lease を開けること、期限の改ざんを拒否すること、偽の minter に対する再利用と取り直し、拒否時の例外を確かめる。
 
+## マージ制御（AWAI-3574）
+
+非公開 repo では GitHub の branch protection と ruleset が今のプランで使えない（AWAI-3573、HTTP 403）。そのため、`tatara/ci` を通った PR だけを Tatara 自身がマージする。
+
+- **設定:** `:github {:merge {:repos ["network-awai/network-awai-apex"] :label "tatara:merge" :method "squash" :lease {...}}}`。`:merge` がなければ何もマージしない。
+- **条件:** PR が open で draft でなく、ラベル `tatara:merge` が付いていて、**この coordinator 自身の記録**で、その PR の head SHA の quorum が passed であり、同じ SHA に failed / hard-error の run がないこと。GitHub の commit status は見ない（`statuses: write` を持つ誰でも書けるため）。
+- **マージ:** `PUT /repos/{repo}/pulls/{n}/merge` に `{:merge_method "squash" :sha <検証した head>}` を送る。検証後に head が変わっていれば GitHub が拒否し（405 / 409）、`:not-mergeable` として記録する。次の head が検証されれば、改めてマージされる。
+- **結果:** `:merged`、`:waiting`（run がない・実行中）、`:blocked`（failed / hard-error）、`:not-mergeable`、`:error`。
+- **token:** マージには `contents: write` が要る。ポーリング用の lease は読み取りのまま残し、`:merge :lease` で対象 repo だけに絞った別の lease（`{:contents "write" :pull_requests "read" :metadata "read"}`）を使う。`:merge :token` は手元の試験用。
+- **導入に必要なこと（owner・運用者）:** GitHub App に Contents の write 権限を付ける。kagitaba の policy でマージ用 lease を許可する。coordinator の設定に `:merge` を足して再起動する。
+- **限界:** GitHub の機能ではないため、マージ権限を持つ人が GitHub の画面やコマンドで直接マージすることは止められない。運用としてラベルだけでマージする。
+
 ## API
 
 | 呼び出し | 認証 | 内容 |

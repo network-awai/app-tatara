@@ -185,3 +185,84 @@
                (finally (srv/stop! srv))))
         (finally (hs/server-stop! s))))))
 
+
+;; ── merge gate (AWAI-3574) ─────────────────────────────────────────────────
+
+(defn- fake-merge-github
+  "pulls: vector of PR maps. merge-replies: atom {number status}. merged: atom of requests."
+  [pulls merge-replies merged]
+  (let [handler (fn [{:keys [uri request-method body]}]
+                  (cond
+                    (and (= :get request-method) (= uri (str "/repos/" repo "/pulls")))
+                    {:status 200 :body (json/generate-string pulls)}
+                    (and (= :put request-method) (re-matches #".*/pulls/\d+/merge" uri))
+                    (let [n (parse-long (second (re-find #"/pulls/(\d+)/merge" uri)))
+                          req (json/parse-string (slurp body) true)
+                          st (get @merge-replies n 200)]
+                      (swap! merged conj (assoc req :number n))
+                      {:status st :body (json/generate-string (if (= 200 st) {:merged true :sha (str "merge-" n)} {:message "Head branch was modified"}))})
+                    :else {:status 404 :body "{}"}))
+        s (hs/run-server handler {:port 0 :legacy-return-value? false})]
+    {:stop #(hs/server-stop! s) :api (str "http://127.0.0.1:" (hs/server-port s))}))
+
+(defn- run-of [sha status result]
+  (let [vc (str "v-" sha)]
+    {:repo repo :sha sha :status status
+     :entries [{:runner "a" :verdict-cid vc :result result} {:runner "b" :verdict-cid vc :result result}]
+     :outcome (when (= :reached status) {:status :reached :verdict-cid vc})}))
+
+(def label [{:name "tatara:merge"}])
+
+(deftest merge-gate-merges-only-labelled-verified-heads
+  (let [merged (atom []) replies (atom {5 409})
+        pulls [{:number 1 :head {:sha "ok"} :labels label}
+               {:number 2 :head {:sha "ok-unlabelled"} :labels []}
+               {:number 3 :head {:sha "failed"} :labels label}
+               {:number 4 :head {:sha "running"} :labels label}
+               {:number 5 :head {:sha "moved"} :labels label}
+               {:number 6 :head {:sha "ok-draft"} :labels label :draft true}
+               {:number 7 :head {:sha "never-run"} :labels label}
+               {:number 8 :head {:sha "hard"} :labels label}]
+        fake (fake-merge-github pulls replies merged)
+        state {:runs {"r1" (run-of "ok" :reached :passed)
+                      "r2" (run-of "ok-unlabelled" :reached :passed)
+                      "r3" (run-of "failed" :reached :failed)
+                      "r4" {:repo repo :sha "running" :status :pending :entries []}
+                      "r5" (run-of "moved" :reached :passed)
+                      "r6" (run-of "ok-draft" :reached :passed)
+                      "r8" {:repo repo :sha "hard" :status :hard-error :entries []}}}
+        server {:state (atom state)}
+        g {:api (:api fake) :token "read-only" :merge {:repos [repo] :token "merge-token"}}]
+    (try
+      (let [out (into {} (map (juxt :number identity)) (gh/merge-once server g))]
+        (testing "labelled + passed quorum is squash-merged with the verified SHA as a guard"
+          (is (= :merged (get-in out [1 :outcome])))
+          (is (= {:merge_method "squash" :sha "ok" :number 1} (first (filter #(= 1 (:number %)) @merged)))))
+        (testing "unlabelled and draft PRs are ignored, even when verified"
+          (is (not (contains? out 2))) (is (not (contains? out 6))))
+        (testing "a failed or hard-errored quorum blocks; pending and missing runs wait"
+          (is (= :blocked (get-in out [3 :outcome]))) (is (= :blocked (get-in out [8 :outcome])))
+          (is (= :waiting (get-in out [4 :outcome]))) (is (= :waiting (get-in out [7 :outcome]))))
+        (testing "GitHub refusing the SHA guard (head moved) is reported, not retried as success"
+          (is (= :not-mergeable (get-in out [5 :outcome])))
+          (is (= 409 (get-in out [5 :status]))))
+        (testing "only the passed heads reached the merge endpoint"
+          (is (= #{1 5} (set (map :number @merged))))))
+      (finally ((:stop fake))))))
+
+(deftest merge-gate-reads-the-coordinator-not-the-github-status
+  (testing "a success status set by someone else does not make a head mergeable"
+    (is (= :unknown (gh/sha-verdict {:runs {}} repo "forged")))
+    (is (= :failed (gh/sha-verdict {:runs {"a" (run-of "x" :reached :passed) "b" (run-of "x" :reached :failed)}} repo "x")))
+    (is (= :passed (gh/sha-verdict {:runs {"a" (run-of "x" :reached :passed)}} repo "x")))
+    (is (= :unknown (gh/sha-verdict {:runs {"a" (run-of "x" :reached :passed)}} "other/repo" "x")))))
+
+(deftest no-merge-config-no-merge-worker
+  (with-redefs [gh/heads (fn [& _] []) gh/deliver-once (fn [& _] [])]
+    (let [t1 (gh/start-loops! {} {:repos [repo] :interval-ms 1000})
+          t2 (gh/start-loops! {} {:repos [repo] :interval-ms 1000 :merge {:repos [repo]}})]
+      (try
+        (is (= 2 (count t1)))
+        (is (= 3 (count t2)))
+        (is (some #(= "tatara-github-merge" (.getName ^Thread %)) t2))
+        (finally (doseq [t (concat t1 t2)] (.interrupt ^Thread t)))))))
