@@ -17,6 +17,6 @@ cp="$PWD/build/cljs-src"
 while read -r hash jar; do
   cp="$cp:$toolchain/maven/$jar"
 done < "$toolchain/maven.sha256"
-export JAVA_HOME JAVA_CMD="$JAVA_HOME/bin/java"
+export JAVA_HOME JAVA_CMD="$JAVA_HOME/bin/java" CLJ_CONFIG="$HOME/.clojure"
 unset CLJ_JVM_OPTS JAVA_OPTS JDK_JAVA_OPTIONS JAVA_TOOL_OPTIONS _JAVA_OPTIONS
-exec "$toolchain/clojure/clojure" -Srepro -Scp "$cp" -J-Xmx2g -J-XX:ActiveProcessorCount=2 "$@"
+exec "$toolchain/clojure/clojure" -Srepro -Scp "$cp" "-J-Duser.home=$HOME" -J-Xmx2g -J-XX:ActiveProcessorCount=2 "$@"
