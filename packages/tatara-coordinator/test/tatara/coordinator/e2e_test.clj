@@ -179,3 +179,19 @@
             (is (not (:ok? (vf/verify-run device-ctx b))) (str what))))
         (is (= 404 (:status (http/get (str (base s) "/v1/runs/cid:sha256:nope/bundle") {:throw false})))))
       (finally (srv/stop! s)))))
+
+(deftest required-toolchain-is-routed-only-to-configured-runners
+  (let [s (srv/start! {:root *root* :allow #{(:did a) (:did b)} :ttl-ms 60000
+                       :runner-toolchains {(:did a) #{:cljs-jvm-v1}}}
+                      {:clock clock :admin-token admin})
+        ca (cl/client (base s) a clock)
+        cb (cl/client (base s) b clock)
+        required (assoc pipeline :toolchain :cljs-jvm-v1)
+        jvm-event (assoc event :pipeline-cid (c/cid crypto/ctx required))]
+    (try
+      (is (= 200 (:status (submit s {:event jvm-event :pipeline required}))))
+      (is (= :no-job (get-in (cl/lease cb [:t2]) [:body :error])))
+      (is (= :cljs-jvm-v1 (get-in (cl/lease ca [:t2]) [:body :pipeline :toolchain])))
+      (is (= 200 (:status (submit s {:event event :pipeline pipeline}))))
+      (is (= pipeline (get-in (cl/lease cb [:t2]) [:body :pipeline])))
+      (finally (srv/stop! s)))))

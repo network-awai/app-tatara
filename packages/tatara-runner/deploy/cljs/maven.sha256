@@ -1,0 +1,14 @@
+dfdee131460216a84fef22e537bb0d0579965f8f70338d748323dff26f8e5a8b  org/clojure/clojure/1.12.5/clojure-1.12.5.jar
+cc8795a3f7a0238d4a7b69413b969cb12ed8ccb7a9991e9e06d107743f8d55e7  org/clojure/clojurescript/1.12.145/clojurescript-1.12.145.jar
+eb73ac08cf49ba840c88ba67beef11336ca554333d9408808d78946e0feb9ddb  org/clojure/core.specs.alpha/0.4.74/core.specs.alpha-0.4.74.jar
+94cd99b6ea639641f37af4860a643b6ed399ee5a8be5d717cff0b663c8d75077  org/clojure/spec.alpha/0.5.238/spec.alpha-0.5.238.jar
+eb68573d46dda85601cc63d9b1c287feb5e89e76e92502e826efd0a323f7cb54  com/cognitect/transit-java/1.0.362/transit-java-1.0.362.jar
+171d24354ffe7dcd378fe4dfb30e4673859391f4da11a70ba04fdac0dd4d82d2  com/google/javascript/closure-compiler/v20250820/closure-compiler-v20250820.jar
+451cc32a6897448c925a9c72338a7a573a874bd3da0b385eda87e81c060d7e1a  org/clojure/google-closure-library/0.0-20250515-f04e4c0e/google-closure-library-0.0-20250515-f04e4c0e.jar
+11d1b31f2c65c3355b292bb9b44b8fcafda54b44da63e34ab97b79a8ab3bb8e0  org/clojure/tools.reader/1.3.6/tools.reader-1.3.6.jar
+256ff34118ab292d1b4f3ee4d2c3e5e5f0f609d8e07c57e8ad1f51c46d4fbb46  com/fasterxml/jackson/core/jackson-core/2.8.7/jackson-core-2.8.7.jar
+883007989d373d19f352ba9792b25dec21dc7d0e205a710a93a3815101bb3d03  javax/xml/bind/jaxb-api/2.3.0/jaxb-api-2.3.0.jar
+e09ca65d8520488e80a5dc426848a8afccfd40f4a2eb3b9646042595d3bd9b5e  org/msgpack/msgpack/0.6.12/msgpack-0.6.12.jar
+499a8b5ee6ffc63632bde745a98023967a7a66ccb6ad76411121fb2745d8d3a3  org/clojure/google-closure-library-third-party/0.0-20250515-f04e4c0e/google-closure-library-third-party-0.0-20250515-f04e4c0e.jar
+4e69696892b88b41c55d49ab2fdcc21eead92bf54acc588c0050596c3b75199c  com/googlecode/json-simple/json-simple/1.1.1/json-simple-1.1.1.jar
+3fb71231afd098bb0f93f5eb97aa8291c8d0556379125e596f92ec8f944c6162  org/javassist/javassist/3.18.1-GA/javassist-3.18.1-GA.jar

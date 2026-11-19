@@ -1,0 +1,22 @@
+#!/bin/sh
+# The project's existing Node build calls clojure from app/.
+set -eu
+toolchain=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+case "$(uname -s)" in
+  Darwin) sha256() { shasum -a 256 "$@"; }; JAVA_HOME="$toolchain/jdk/Contents/Home" ;;
+  Linux)  sha256() { sha256sum "$@"; }; JAVA_HOME="$toolchain/jdk" ;;
+  *) exit 2 ;;
+esac
+deps_sha=$(sha256 deps.edn)
+if [ "${deps_sha%% *}" != 0c9d3db944b87d18ed51a5582cbe70384016298e74e5e5e67f096eac22f55997 ]; then
+  printf '%s\n' 'app/deps.edn differs from the deps of cljs-jvm-v1' >&2
+  exit 2
+fi
+test -d build/cljs-src
+cp="$PWD/build/cljs-src"
+while read -r hash jar; do
+  cp="$cp:$toolchain/maven/$jar"
+done < "$toolchain/maven.sha256"
+export JAVA_HOME JAVA_CMD="$JAVA_HOME/bin/java"
+unset CLJ_JVM_OPTS JAVA_OPTS JDK_JAVA_OPTIONS JAVA_TOOL_OPTIONS _JAVA_OPTIONS
+exec "$toolchain/clojure/clojure" -Srepro -Scp "$cp" -J-Xmx2g -J-XX:ActiveProcessorCount=2 "$@"
