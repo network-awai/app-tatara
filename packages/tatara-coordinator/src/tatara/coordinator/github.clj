@@ -3,7 +3,7 @@
 
   poll-once: for each configured repo, read the open PR heads and the default
   branch head; for every commit that carries `.tatara/pipeline.edn`, submit a
-  run. Commits are remembered per process so their pipeline file is read once.
+  run. Commits are remembered per process after admission or a missing pipeline.
   deliver-once: send each pending outbox action as a commit status and mark it
   delivered only after GitHub answers 2xx; failures stay pending for the next
   round. The token stays in the coordinator process; runners never see it."
@@ -20,9 +20,7 @@
 (def default-max-snapshot-bytes (* 2 1024 1024 1024))
 (def max-pipeline-bytes 65536)
 
-;; Every GitHub call has a connect and a request timeout. Without them one
-;; stalled connection blocked the poll/delivery thread, so no status was sent
-;; (AWAI-3542, 2026-11-19).
+;; Bound each GitHub request so the background workers can retry.
 (def ^:private client
   (delay (http/client {:connect-timeout 10000 :follow-redirects :normal})))
 (def api-timeout-ms 30000)
@@ -88,25 +86,45 @@
       (> (count data) limit) (throw (ex-info "snapshot too large" {:repo repo :sha sha :bytes (count data)}))
       :else (srv/put-blob! server data))))
 
+(defn- failure [phase e]
+  (merge {:phase phase :type (str (class e))}
+         (select-keys (ex-data e) [:status :bytes])))
+
+(defn- poll-head [server gh seen repo {:keys [ref sha]}]
+  (let [key [repo sha]
+        result {:repo repo :sha sha}]
+    (try
+      (let [pipeline (pipeline-at gh repo sha)
+            reply (if (= :absent pipeline)
+                    :no-pipeline
+                    (srv/submit! server
+                                 {:event {:forge "github" :repo repo :ref ref :sha sha
+                                          :pipeline-cid (c/cid crypto/ctx pipeline)}
+                                  :pipeline pipeline
+                                  :snapshot (try (snapshot! server gh repo sha)
+                                                 (catch Exception e
+                                                   (throw (ex-info "snapshot failed"
+                                                                   (failure :snapshot e) e))))}))]
+        (when (or (= :no-pipeline reply) (:run-id reply))
+          (swap! seen conj key))
+        (assoc result :reply reply))
+      (catch Exception e
+        (assoc result :error (if (= :snapshot (:phase (ex-data e)))
+                               (ex-data e)
+                               (failure :admission e)))))))
+
+(defn- poll-repo [server gh seen repo]
+  (try
+    (vec (for [{:keys [sha] :as head} (heads gh repo)
+               :when (and sha (not (contains? @seen [repo sha])))]
+           (poll-head server gh seen repo head)))
+    (catch Exception e
+      [{:repo repo :error (failure :heads e)}])))
+
 (defn poll-once
-  "seen: atom #{[repo sha]}. Returns [{:repo :sha :reply}|{:repo :error}]."
+  "Poll configured repositories once. Failed heads remain eligible for retry."
   [server gh seen]
-  (vec
-   (for [repo (:repos gh)
-         result (try
-                  (vec (for [{:keys [ref sha]} (heads gh repo)
-                             :when (and sha (not (contains? @seen [repo sha])))]
-                         (let [p (pipeline-at gh repo sha)]
-                           (swap! seen conj [repo sha])
-                           (if (= :absent p)
-                             {:repo repo :sha sha :reply :no-pipeline}
-                             {:repo repo :sha sha
-                              :reply (srv/submit! server {:event {:forge "github" :repo repo :ref ref :sha sha
-                                                                  :pipeline-cid (c/cid crypto/ctx p)}
-                                                          :pipeline p
-                                                          :snapshot (snapshot! server gh repo sha)})}))))
-                  (catch clojure.lang.ExceptionInfo e [{:repo repo :error (ex-data e)}]))]
-     result)))
+  (into [] (mapcat #(poll-repo server gh seen %)) (:repos gh)))
 
 (defn- finished-runs
   "Run ids that already have a final (non-pending) status action, delivered or not."
@@ -129,27 +147,44 @@
            :when (= :github-status (:kind a))]
        (if (and (= "pending" (:state a)) (contains? done (:run-id a)))
          (do (srv/mark-delivered! server k) {:key k :skipped :superseded})
-         (let [r (api gh :post (str "/repos/" (:repo a) "/statuses/" (:sha a))
-                      (cond-> {:state (:state a) :context (:context a) :description (:description a)}
-                        (:target-base gh) (assoc :target_url (str (:target-base gh) "/v1/runs/" (:run-id a)))))]
-           (when (<= 200 (:status r) 299) (srv/mark-delivered! server k))
-           {:key k :status (:status r)}))))))
+         (try
+           (let [r (api gh :post (str "/repos/" (:repo a) "/statuses/" (:sha a))
+                        (cond-> {:state (:state a) :context (:context a) :description (:description a)}
+                          (:target-base gh) (assoc :target_url (str (:target-base gh) "/v1/runs/" (:run-id a)))))]
+             (when (<= 200 (:status r) 299) (srv/mark-delivered! server k))
+             {:key k :status (:status r)})
+           (catch Exception e
+             {:key k :repo (:repo a) :sha (:sha a) :error (failure :status e)})))))))
+
+(defn- start-worker! [label interval-ms tick]
+  (doto (Thread. ^Runnable
+                 (fn []
+                   (try
+                     (loop []
+                       (try (tick)
+                            (catch Exception e
+                              (println label (pr-str (failure :worker e)))))
+                       (Thread/sleep (long interval-ms))
+                       (recur))
+                     (catch InterruptedException _)))
+                 label)
+    (.setDaemon true)
+    (.start)))
 
 (defn start-loops!
-  "Run poll and delivery every :interval-ms on a daemon thread. Errors are
-  printed and the loop continues."
+  "Poll each configured repository independently and drain the outbox on a
+  separate daemon thread. Return the worker threads."
   [server gh]
-  (let [seen (atom #{})
-        t (Thread. ^Runnable
-                   (fn []
-                     (loop []
-                       ;; Poll and delivery fail separately: a poll error must not hold back statuses.
-                       (try (doseq [r (poll-once server gh seen) :when (or (:error r) (map? (:reply r)))]
-                              (println "poll" (pr-str r)))
-                            (catch Exception e (println "github poll error" (.getMessage e))))
-                       (try (doseq [d (deliver-once server gh) :when (and (:status d) (not (<= 200 (:status d) 299)))]
-                              (println "status delivery failed" (pr-str d)))
-                            (catch Exception e (println "github delivery error" (.getMessage e))))
-                       (Thread/sleep (long (:interval-ms gh 60000)))
-                       (recur))))]
-    (.setDaemon t true) (.start t) t))
+  (let [interval-ms (:interval-ms gh 60000)]
+    (conj
+     (mapv (fn [repo]
+             (let [seen (atom #{})]
+               (start-worker! (str "tatara-github-poll-" repo) interval-ms
+                              #(doseq [r (poll-repo server gh seen repo)
+                                       :when (or (:error r) (map? (:reply r)))]
+                                 (println "poll" (pr-str r))))))
+           (distinct (:repos gh)))
+     (start-worker! "tatara-github-delivery" interval-ms
+                    #(doseq [{:keys [status error] :as d} (deliver-once server gh)
+                             :when (or error (and status (not (<= 200 status 299))))]
+                       (println "status delivery failed" (pr-str d)))))))

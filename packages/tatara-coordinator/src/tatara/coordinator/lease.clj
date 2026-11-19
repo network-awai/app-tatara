@@ -104,9 +104,10 @@
   [cfg & [{:keys [clock] :or {clock #(System/currentTimeMillis)}}]]
   (let [cache (atom nil)]
     (fn []
-      (let [now (clock) c @cache]
-        (if (and c (< now (- (:expires-ms c) refresh-before-ms)))
-          (:token c)
-          (:token (reset! cache (request-lease cfg now))))))))
+      (locking cache
+        (let [now (clock) c @cache]
+          (if (and c (< now (- (:expires-ms c) refresh-before-ms)))
+            (:token c)
+            (:token (reset! cache (request-lease cfg now)))))))))
 
 (defn read-identity [path] (edn/read-string (slurp path)))

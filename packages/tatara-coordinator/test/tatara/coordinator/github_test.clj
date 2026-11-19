@@ -4,7 +4,6 @@
             [cheshire.core :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [org.httpkit.client]
             [org.httpkit.server :as hs]
             [tatara.coordinator.client :as cl]
             [tatara.coordinator.crypto :as crypto]
@@ -12,7 +11,8 @@
             [tatara.coordinator.github :as gh]
             [tatara.coordinator.http :as srv]
             [tatara.coordinator.service :as svc])
-  (:import (java.util Base64)))
+  (:import (java.net.http HttpTimeoutException)
+           (java.util Base64)))
 
 (def repo "network-awai/example")
 (def pipeline-text (pr-str e2e/pipeline))
@@ -109,38 +109,62 @@
     (let [root (str (fs/create-temp-dir {:prefix "tatara-gh-loop-"}))
           posted (atom []) fake (fake-github {"main-sha" pipeline-text} (atom 0) posted)
           s (srv/start! {:root root :allow #{}} {:clock e2e/clock})]
-      (try
-        (gh/start-loops! s {:api (:api fake) :token "t" :repos [repo] :interval-ms 600000})
-        (loop [i 0] (when (and (< i 100) (empty? @posted)) (Thread/sleep 100) (recur (inc i))))
-        (is (= 1 (count (:runs @(:state s)))))
-        (is (= ["pending"] (mapv :state @posted)))
-        (finally (srv/stop! s) ((:stop fake)) (fs/delete-tree root))))))
+      (let [threads (gh/start-loops! s {:api (:api fake) :token "t" :repos [repo] :interval-ms 100})]
+        (try
+          (loop [i 0] (when (and (< i 100) (empty? @posted)) (Thread/sleep 100) (recur (inc i))))
+          (is (= 1 (count (:runs @(:state s)))))
+          (is (= ["pending"] (mapv :state @posted)))
+          (finally
+            (doseq [t threads] (.interrupt t) (.join t 1000))
+            (srv/stop! s) ((:stop fake)) (fs/delete-tree root)))))))
 
-(deftest a-stalled-poll-does-not-hold-back-statuses
-  (testing "GitHub calls time out, and delivery still runs after a failed poll (AWAI-3542)"
-    (let [root (str (fs/create-temp-dir {:prefix "tatara-gh-stall-"}))
-          posted (atom []) stall (atom false)
-          fake (fake-github {"main-sha" pipeline-text} (atom 0) posted)
-          stalling (hs/run-server (fn [{:keys [uri] :as req}]
-                                    (if (and @stall (not (str/includes? uri "/statuses/")))
-                                      (do (Thread/sleep 3000) {:status 200 :body "{}"})
-                                      (let [r (clojure.core/deref (org.httpkit.client/request
-                                                                   {:url (str (:api fake) uri (when (:query-string req) (str "?" (:query-string req))))
-                                                                    :method (:request-method req)
-                                                                    :body (some-> (:body req) slurp)}))]
-                                        {:status (:status r) :headers {"content-type" "application/json"} :body (:body r)})))
-                                  {:port 0 :legacy-return-value? false})
-          g {:api (str "http://127.0.0.1:" (hs/server-port stalling)) :token "t" :repos [repo] :timeout-ms 500}
-          s (srv/start! {:root root :allow #{}} {:clock e2e/clock})]
-      (try
-        (gh/poll-once s g (atom #{}))
-        (is (= 1 (count (svc/pending-actions @(:state s)))))
-        (reset! stall true)
-        (is (thrown? Exception (gh/poll-once s g (atom #{}))) "a stalled call times out instead of blocking")
-        (gh/start-loops! s (assoc g :interval-ms 600000))
-        (loop [i 0] (when (and (< i 100) (empty? @posted)) (Thread/sleep 100) (recur (inc i))))
-        (is (= ["pending"] (mapv :state @posted)))
-        (finally (srv/stop! s) (hs/server-stop! stalling) ((:stop fake)) (fs/delete-tree root))))))
+(deftest a-timed-out-snapshot-is-retried-without-skipping-later-heads
+  (let [seen (atom #{})
+        stalled? (atom true)
+        submitted (atom [])
+        server {}
+        g {:repos [repo "another/repo"]}]
+    (with-redefs [gh/heads (fn [_ r] (if (= r repo)
+                                      [{:ref "refs/heads/main" :sha "first"}
+                                       {:ref "refs/pull/1/head" :sha "second"}]
+                                      [{:ref "refs/heads/main" :sha "other"}]))
+                  gh/pipeline-at (constantly e2e/pipeline)
+                  gh/snapshot! (fn [_ _ _ sha]
+                                 (when (and (= "first" sha) (compare-and-set! stalled? true false))
+                                   (throw (HttpTimeoutException. "test snapshot timeout"))))
+                  srv/submit! (fn [_ {:keys [event]}]
+                                (swap! submitted conj (:sha event))
+                                {:run-id (:sha event)})]
+      (let [results (gh/poll-once server g seen)]
+        (is (= :snapshot (get-in (first results) [:error :phase])))
+        (is (= ["second" "other"] @submitted))
+        (is (not (contains? @seen [repo "first"]))))
+      (gh/poll-once server g seen)
+      (is (= ["second" "other" "first"] @submitted))
+      (is (empty? (gh/poll-once server g seen))))))
+
+(deftest a-stalled-repository-does-not-block-other-repos-or-delivery
+  (let [stalled-repo "network-awai/stalled"
+        entered (promise)
+        release (promise)
+        delivered (promise)
+        admitted (promise)]
+    (with-redefs [gh/heads (fn [_ r]
+                            (if (= stalled-repo r)
+                              (do (deliver entered true) @release [])
+                              [{:ref "refs/pull/7/head" :sha "pr-sha"}]))
+                  gh/pipeline-at (constantly e2e/pipeline)
+                  gh/snapshot! (constantly nil)
+                  srv/submit! (fn [_ data] (deliver admitted (:event data)) {:run-id "test"})
+                  gh/deliver-once (fn [_ _] (deliver delivered true) [])]
+      (let [threads (gh/start-loops! {} {:repos [stalled-repo repo]})]
+        (try
+          (is (= true (deref entered 5000 false)))
+          (is (= [repo "pr-sha"] ((juxt :repo :sha) (deref admitted 5000 {}))))
+          (is (= true (deref delivered 5000 false)))
+          (finally
+            (deliver release true)
+            (doseq [t threads] (.interrupt t) (.join t 1000))))))))
 
 (deftest unreadable-pull-requests-are-an-error-not-silence
   (testing "a 403 on the PR list (private repo, lease without pull_requests: read) is reported"
@@ -155,7 +179,9 @@
           (is (some? e))
           (is (= 403 (:status (ex-data e)))))
         (let [srv (srv/start! {:root (str (fs/create-temp-dir {:prefix "tatara-gh-"})) :allow #{}} {:clock e2e/clock})]
-          (try (is (= [{:repo repo :error {:repo repo :status 403}}] (gh/poll-once srv g (atom #{}))))
+          (try (let [[result] (gh/poll-once srv g (atom #{}))]
+                 (is (= repo (:repo result)))
+                 (is (= 403 (get-in result [:error :status]))))
                (finally (srv/stop! srv))))
         (finally (hs/server-stop! s))))))
 
