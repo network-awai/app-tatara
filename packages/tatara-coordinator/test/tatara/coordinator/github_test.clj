@@ -84,6 +84,25 @@
           (srv/stop! s2)))
       (finally ((:stop fake)) (fs/delete-tree root)))))
 
+(deftest a-run-finished-before-delivery-posts-only-its-result
+  (testing "pending is not sent after success when both are queued in one round (AWAI-3542)"
+    (let [root (str (fs/create-temp-dir {:prefix "tatara-gh-order-"}))
+          posted (atom []) fake (fake-github {"main-sha" pipeline-text} (atom 0) posted)
+          s (srv/start! {:root root :allow #{(:did e2e/a) (:did e2e/b)}} {:clock e2e/clock})
+          g {:api (:api fake) :token "t" :repos [repo]}]
+      (try
+        (gh/poll-once s g (atom #{}))
+        (let [ca (cl/client (str "http://127.0.0.1:" (:port s)) e2e/a e2e/clock)
+              cb (cl/client (str "http://127.0.0.1:" (:port s)) e2e/b e2e/clock)
+              ja (:body (cl/lease ca [:t2])) jb (:body (cl/lease cb [:t2]))]
+          (e2e/do-job ca ja "same") (e2e/do-job cb jb "same")
+          (is (= 2 (count (svc/pending-actions @(:state s)))))
+          (let [d (gh/deliver-once s g)]
+            (is (= 1 (count (filter :skipped d)))))
+          (is (= [["success" "main-sha"]] (mapv (juxt :state :sha) @posted)))
+          (is (empty? (svc/pending-actions @(:state s)))))
+        (finally (srv/stop! s) ((:stop fake)) (fs/delete-tree root))))))
+
 (deftest the-background-loop-polls-and-delivers
   (testing "start-loops! runs a poll and a delivery round (AWAI-3411: it once called poll-once with too few args)"
     (let [root (str (fs/create-temp-dir {:prefix "tatara-gh-loop-"}))

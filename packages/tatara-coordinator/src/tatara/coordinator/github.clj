@@ -99,17 +99,32 @@
                   (catch clojure.lang.ExceptionInfo e [{:repo repo :error (ex-data e)}]))]
      result)))
 
+(defn- finished-runs
+  "Run ids that already have a final (non-pending) status action, delivered or not."
+  [state]
+  (->> (vals (get-in state [:outbox :actions]))
+       (filter #(and (= :github-status (:kind %)) (not= "pending" (:state %))))
+       (map :run-id)
+       set))
+
 (defn deliver-once
-  "Send pending commit statuses. Returns [{:key :status}]."
+  "Send pending commit statuses. Returns [{:key :status}].
+  A pending status of a run that already has a final one is marked delivered
+  without being sent ({:key :skipped :superseded}). Otherwise, when both are
+  queued in one round, the pending one could reach GitHub last and hide the result."
   [server gh]
-  (vec
-   (for [{k :key a :action} (svc/pending-actions @(:state server))
-         :when (= :github-status (:kind a))]
-     (let [r (api gh :post (str "/repos/" (:repo a) "/statuses/" (:sha a))
-                  (cond-> {:state (:state a) :context (:context a) :description (:description a)}
-                    (:target-base gh) (assoc :target_url (str (:target-base gh) "/v1/runs/" (:run-id a)))))]
-       (when (<= 200 (:status r) 299) (srv/mark-delivered! server k))
-       {:key k :status (:status r)}))))
+  (let [st @(:state server)
+        done (finished-runs st)]
+    (vec
+     (for [{k :key a :action} (svc/pending-actions st)
+           :when (= :github-status (:kind a))]
+       (if (and (= "pending" (:state a)) (contains? done (:run-id a)))
+         (do (srv/mark-delivered! server k) {:key k :skipped :superseded})
+         (let [r (api gh :post (str "/repos/" (:repo a) "/statuses/" (:sha a))
+                      (cond-> {:state (:state a) :context (:context a) :description (:description a)}
+                        (:target-base gh) (assoc :target_url (str (:target-base gh) "/v1/runs/" (:run-id a)))))]
+           (when (<= 200 (:status r) 299) (srv/mark-delivered! server k))
+           {:key k :status (:status r)}))))))
 
 (defn start-loops!
   "Run poll and delivery every :interval-ms on a daemon thread. Errors are
@@ -121,7 +136,7 @@
                      (loop []
                        (try (doseq [r (poll-once server gh seen) :when (or (:error r) (map? (:reply r)))]
                               (println "poll" (pr-str r)))
-                            (doseq [d (deliver-once server gh) :when (not (<= 200 (:status d) 299))]
+                            (doseq [d (deliver-once server gh) :when (and (:status d) (not (<= 200 (:status d) 299)))]
                               (println "status delivery failed" (pr-str d)))
                             (catch Exception e (println "github loop error" (.getMessage e))))
                        (Thread/sleep (long (:interval-ms gh 60000)))
