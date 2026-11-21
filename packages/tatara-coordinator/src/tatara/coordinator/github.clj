@@ -86,6 +86,19 @@
       (> (count data) limit) (throw (ex-info "snapshot too large" {:repo repo :sha sha :bytes (count data)}))
       :else (srv/put-blob! server data))))
 
+(defn- interrupt? [^Throwable e]
+  (loop [e e]
+    (cond (nil? e) false
+          (instance? InterruptedException e) true
+          :else (recur (.getCause e)))))
+
+(defn- unless-interrupt
+  "Rethrow e when it is (or wraps) an interrupt, so a stopped worker stops
+  instead of recording the interrupt as a GitHub failure (AWAI-3820)."
+  [^Throwable e]
+  (when (interrupt? e) (throw (InterruptedException. "interrupted")))
+  e)
+
 (defn- failure [phase e]
   (merge {:phase phase :type (str (class e))}
          (select-keys (ex-data e) [:status :bytes])))
@@ -109,12 +122,14 @@
                                   :pipeline pipeline
                                   :snapshot (try (snapshot! server gh repo sha)
                                                  (catch Exception e
+                                                   (unless-interrupt e)
                                                    (throw (ex-info "snapshot failed"
                                                                    (failure :snapshot e) e))))}))]
         (when (or (= :no-pipeline reply) (:run-id reply))
           (swap! seen conj key))
         (assoc result :reply reply))
       (catch Exception e
+        (unless-interrupt e)
         (assoc result :error (if (= :snapshot (:phase (ex-data e)))
                                (ex-data e)
                                (failure :admission e)))))))
@@ -129,6 +144,7 @@
                  :when (and sha (not (contains? @seen [repo sha])))]
              (poll-head server gh seen repo trusted head))))
     (catch Exception e
+      (unless-interrupt e)
       [{:repo repo :error (failure :heads e)}])))
 
 (defn poll-once
@@ -164,6 +180,7 @@
              (when (<= 200 (:status r) 299) (srv/mark-delivered! server k))
              {:key k :status (:status r)})
            (catch Exception e
+             (unless-interrupt e)
              {:key k :repo (:repo a) :sha (:sha a) :error (failure :status e)})))))))
 
 ;; ── merge gate (AWAI-3574) ──────────────────────────────────────────────────
@@ -203,7 +220,7 @@
     (vec
      (for [repo (distinct repos)
            :let [pulls (try (api mgh :get (str "/repos/" repo "/pulls?state=open&per_page=100"))
-                            (catch Exception e {:error (failure :merge-list e)}))]
+                            (catch Exception e (unless-interrupt e) {:error (failure :merge-list e)}))]
            p (if (= 200 (:status pulls)) (:body pulls) [{::list-failed pulls}])
            :let [failed (::list-failed p)]
            :when (or failed (and (not (:draft p)) (some #(= label (:name %)) (:labels p))))]
@@ -219,20 +236,29 @@
                                (#{405 409} (:status r)) (assoc base :outcome :not-mergeable :status (:status r)
                                                               :message (get-in r [:body :message]))
                                :else (assoc base :outcome :error :status (:status r))))
-                       (catch Exception e (assoc base :outcome :error :error (failure :merge e))))
+                       (catch Exception e (unless-interrupt e) (assoc base :outcome :error :error (failure :merge e))))
              :failed (assoc base :outcome :blocked)
              (assoc base :outcome :waiting))))))))
 
-(defn- start-worker! [label interval-ms tick]
+(defn- start-worker!
+  "Run tick every interval-ms on a daemon thread until the thread is
+  interrupted. An interrupt that lands inside tick (an HTTP call, a blocked
+  deref) ends the worker too: catching it as an ordinary failure kept stopped
+  workers running into later tests (AWAI-3820)."
+  [label interval-ms tick]
   (doto (Thread. ^Runnable
                  (fn []
                    (try
                      (loop []
-                       (try (tick)
-                            (catch Exception e
-                              (println label (pr-str (failure :worker e)))))
-                       (Thread/sleep (long interval-ms))
-                       (recur))
+                       (when-not (.isInterrupted (Thread/currentThread))
+                         (try (tick)
+                              (catch Throwable e
+                                (if (interrupt? e)
+                                  (.interrupt (Thread/currentThread))
+                                  (println label (pr-str (failure :worker e))))))
+                         (when-not (.isInterrupted (Thread/currentThread))
+                           (Thread/sleep (long interval-ms))
+                           (recur))))
                      (catch InterruptedException _)))
                  label)
     (.setDaemon true)
