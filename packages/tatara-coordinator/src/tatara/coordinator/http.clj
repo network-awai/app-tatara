@@ -125,6 +125,19 @@
                   r (mutate! srv #(svc/submit-run cfg % b now))]
               (reply (status-of r) r)))
 
+          (and (= m :post) (= uri "/v1/admin/expire"))
+          (if-not (and admin-token (= (str "Bearer " admin-token) (get-in req [:headers "authorization"])))
+            (reply 401 {:error :unauthorized})
+            (let [b (edn/read-string (String. ^bytes (or (read-bytes req max-body-bytes) (byte-array 0)) "UTF-8"))
+                  ttl (:older-than-ms b)]
+              (if-not (and (integer? ttl) (not (neg? ttl)))
+                (reply 400 {:error :bad-older-than-ms})
+                (reply 200 (mutate! srv #(svc/expire-stale % now ttl))))))
+
+          (and (= m :get) (= uri "/v1/queue"))
+          (let [tier (keyword (or (second (re-find #"(?:^|&)tier=([a-z0-9-]+)" (or (:query-string req) ""))) "t2"))]
+            (reply 200 (svc/queue-depth @state now tier)))
+
           (and (= m :get) (= uri "/v1/runs"))
           (reply 200 (->> (:runs @state) keys (map #(svc/run-view @state %)) (sort-by :created) vec))
 
@@ -173,6 +186,11 @@
   "In-process run submission (the GitHub poller). Persisted before returning."
   [srv body]
   (mutate! srv #(svc/submit-run (:cfg srv) % body ((:clock srv)))))
+
+(defn expire-stale!
+  "Close :pending runs older than ttl-ms (svc/expire-stale). Persisted."
+  [srv ttl-ms]
+  (mutate! srv #(svc/expire-stale % ((:clock srv)) ttl-ms)))
 
 (defn mark-delivered!
   "Record that an outbox action reached its destination. Persisted."

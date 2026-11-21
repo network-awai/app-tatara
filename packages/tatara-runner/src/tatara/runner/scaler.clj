@@ -1,8 +1,9 @@
 (ns tatara.runner.scaler
   "Queue-based scaler for the Kubernetes runner StatefulSet (AWAI-3542).
 
-  Every poll it reads the coordinator's GET /v1/runs and counts demand: replica
-  jobs that are :queued or :leased in runs that are still :pending. It then sets
+  Every poll it reads the coordinator's GET /v1/queue: replica jobs of :pending
+  :t2 runs that are queued or hold a live lease. An unreachable coordinator
+  counts as no demand. It then sets
   the StatefulSet's replica count through the Kubernetes scale subresource:
   - up at once, to (min demand max-replicas), never below the current count;
   - down only to min-replicas, and only after demand has been 0 for
@@ -48,12 +49,26 @@
       (throw (ex-info "kubernetes API call failed" {:path path :err (:err r)})))
     (json/parse-string (:out r) true)))
 
-(defn- runs [coordinator]
+(defn- queue
+  "Demand from the coordinator's small GET /v1/queue (queued + live leases of
+  :t2 runs without a toolchain). Expired leases are already counted as queued
+  there, and runs past their TTL are closed, so lost leases do not hold nodes."
+  [coordinator]
   (let [r (p/shell {:out :string :err :string :continue true}
-                   "curl" "-sS" "-f" "-m" "10" (str coordinator "/v1/runs"))]
+                   "curl" "-sS" "-f" "-m" "10" (str coordinator "/v1/queue?tier=t2"))]
     (when-not (zero? (:exit r))
       (throw (ex-info "coordinator unreachable" {:err (:err r)})))
-    (edn/read-string (:out r))))
+    (let [{:keys [queued leased]} (edn/read-string (:out r))]
+      (+ queued leased))))
+
+(defn observed-demand
+  "Demand to act on. An unreachable coordinator counts as 0: runners cannot
+  lease or complete without it, so after :idle-seconds of outage the pool
+  falls to the minimum instead of holding nodes (AWAI-3799: 276 unreachable
+  polls in 24 h kept 3 replicas and 2 nodes up)."
+  [read-demand]
+  (try {:demand (read-demand)}
+       (catch Exception e {:demand 0 :error (ex-message e) :data (ex-data e)})))
 
 (defn -main
   "bb scale SCALER.edn — {:coordinator url :namespace ns :statefulset name
@@ -69,7 +84,8 @@
       (let [next-idle
             (try
               (let [current (get-in (kube "GET" path) [:spec :replicas] 0)
-                    d (demand (runs coordinator))
+                    {d :demand err :error data :data} (observed-demand #(queue coordinator))
+                    _ (when err (println (str (java.time.Instant/now)) "coordinator:" err (pr-str data)))
                     {:keys [replicas idle-since]} (decide opts {:current current :demand d
                                                                 :idle-since idle-since
                                                                 :now (System/currentTimeMillis)})]
@@ -77,7 +93,7 @@
                   (kube "PATCH" path {:spec {:replicas replicas}})
                   (println (str (java.time.Instant/now)) "demand" d "replicas" current "->" replicas))
                 idle-since)
-              ;; Coordinator or API errors leave the replica count as it is.
+              ;; Kubernetes API errors leave the replica count as it is.
               (catch Exception e
                 (println (str (java.time.Instant/now)) "skip:" (ex-message e) (pr-str (ex-data e)))
                 idle-since))]
