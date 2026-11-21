@@ -266,7 +266,7 @@
         (is (= 2 (count t1)))
         (is (= 3 (count t2)))
         (is (some #(= "tatara-github-merge" (.getName ^Thread %)) t2))
-        (finally (doseq [t (concat t1 t2)] (.interrupt ^Thread t)))))))
+        (finally (doseq [t (concat t1 t2)] (.interrupt ^Thread t) (.join ^Thread t 2000)))))))
 
 (deftest a-pull-request-runs-the-default-branch-pipeline
   (testing "a PR that edits .tatara/pipeline.edn (steps, :fetch) still runs main's pipeline (AWAI-3799)"
@@ -278,8 +278,7 @@
                     gh/snapshot! (constantly nil)
                     srv/submit! (fn [_ body] (swap! submitted conj body) {:run-id (get-in body [:event :sha])})]
         (gh/poll-once {} {:repos [repo]} (atom #{}))
-        ;; A set: worker threads left by start-loops! tests may see these redefs too.
-        (is (= #{"main-sha" "evil-sha"} (set (map #(get-in % [:event :sha]) @submitted))))
+        (is (= ["main-sha" "evil-sha"] (mapv #(get-in % [:event :sha]) @submitted)))
         (is (every? #(= e2e/pipeline (:pipeline %)) @submitted))
         (is (every? #(= (c/cid crypto/ctx e2e/pipeline) (get-in % [:event :pipeline-cid])) @submitted)))))
   (testing "without a readable default branch head nothing runs"
@@ -290,3 +289,13 @@
                     srv/submit! (fn [_ body] (swap! submitted conj body) {:run-id "x"})]
         (is (= [:no-pipeline] (mapv :reply (gh/poll-once {} {:repos [repo]} (atom #{})))))
         (is (empty? @submitted))))))
+
+(deftest an-interrupt-inside-a-tick-stops-the-worker
+  (testing "workers stop even when interrupted in the middle of a blocking call (AWAI-3820)"
+    (let [blocked (promise) never (promise)]
+      (with-redefs [gh/heads (fn [_ _] (deliver blocked true) @never [])
+                    gh/deliver-once (fn [_ _] [])]
+        (let [threads (gh/start-loops! {} {:repos [repo] :interval-ms 50})]
+          (is (= true (deref blocked 5000 false)))
+          (doseq [t threads] (.interrupt ^Thread t) (.join ^Thread t 5000))
+          (is (every? #(not (.isAlive ^Thread %)) threads)))))))
