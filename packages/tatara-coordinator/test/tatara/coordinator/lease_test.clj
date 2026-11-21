@@ -85,3 +85,13 @@
         (is (nil? (get @seen "upgrade")))
         (is (nil? (get @seen "http2-settings")))
         (finally (hs/server-stop! s))))))
+
+(deftest a-down-or-locked-minter-is-reported-not-silent
+  (testing "connection refused is classified as :minter-unreachable and recorded (AWAI-3820)"
+    (let [port (with-open [ss (java.net.ServerSocket. 0)] (.getLocalPort ss))
+          url (str "http://127.0.0.1:" port)
+          p (lease/token-provider {:url url :identity (lease/generate-identity) :owner "o"
+                                   :repositories ["r"] :permissions {:contents "read"}})]
+      (is (thrown? Exception (p)))
+      (is (= :minter-unreachable (get-in @lease/status [url :state])))
+      (is (re-find #"unlock-keychain" (get-in @lease/status [url :detail]))))))
