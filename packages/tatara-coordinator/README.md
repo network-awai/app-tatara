@@ -90,3 +90,16 @@ runner の署名は、本文そのものに対する Ed25519 署名で、本文�
 - admin token は `~/.tatara/coordinator/admin-token`（mode 600）から wrapper が読む。600 でなければ起動しない（exit 78）。plist に秘密は入れない
 - GitHub token は渡さない（`TATARA_GITHUB_TOKEN`、`GITHUB_TOKEN`、`GH_TOKEN` を消してから起動）。`coordinator.edn` の `:github :lease` で kagitaba-minter から 1 時間の token を受け取る
 - `KeepAlive` で異常終了しても再起動する
+
+### Run timings
+
+`GET /v1/runs/<id>` includes `:timings` on the single-run view. `:quorum-ms`
+measures time from coordinator admission to a terminal verdict, including
+split verdicts. For each replica, `:queue-ms` is admission to the latest lease
+claim, and `:lease-to-completion-ms` covers that attempt through accepted
+completion, including snapshot and receipt transfers. Step milliseconds and
+exit status come from the runner receipt, by pipeline step index. A missing
+timestamp or receipt is reported as EDN `nil`; historical and incomplete runs
+may have missing timings. These measurements are operational data. They do not
+change signed verdicts or quorum, and they do not include GitHub polling or
+status delivery time.

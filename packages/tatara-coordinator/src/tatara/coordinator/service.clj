@@ -76,7 +76,7 @@
           (let [res (lease/claim ctx state {:run-id id :runner runner :token token :now now :ttl ttl-ms})]
             (if (:error res)
               (recur more)
-              {:state (:state res)
+              {:state (assoc-in (:state res) [:jobs (:job-id res) :leased-at] now)
                :reply {:job-id (:job-id res) :token token :ttl-ms ttl-ms :run-id id
                        :repo (:repo r) :sha (:sha r) :ref (:ref r)
                        :pipeline (:pipeline r) :pipeline-cid (:pipeline-cid r)
@@ -129,10 +129,11 @@
             r2 (-> r (update :entries conj entry)
                    (update :submissions (fnil conj []) (select-keys sub [:runner :verdict :signed :signature])))
             q (v/quorum (:threshold r2) (:entries r2))
-            r3 (cond-> r2 (not= :pending (:status q)) (assoc :status (:status q) :outcome q))
+            r3 (cond-> r2 (not= :pending (:status q)) (assoc :status (:status q) :outcome q :quorum-at now))
             act (when (not= :pending (:status q)) (outcome-action run-id r3 q))]
         {:state (cond-> (-> state
-                            (assoc-in [:jobs (:job-id sub) :status] :done)
+                            (update-in [:jobs (:job-id sub)] assoc
+                                       :status :done :completed-at now :receipt-cid (:receipt-cid sub))
                             (assoc-in [:runs run-id] r3))
                   act (enqueue act))
          :reply {:ok true :run-status (:status r3) :quorum q}}))))
@@ -149,6 +150,32 @@
            :run-id run-id
            :replicas (->> (:jobs state) vals (filter #(= run-id (:run-id %)))
                           (map #(select-keys % [:index :status :runner])) (sort-by :index) vec))))
+
+(defn- elapsed-ms [start end]
+  (when (and (integer? start) (integer? end) (<= start end))
+    (- end start)))
+
+(defn run-timings [state run-id read-object]
+  (let [{:keys [created quorum-at]} (get-in state [:runs run-id])]
+    {:quorum-ms (elapsed-ms created quorum-at)
+     :replicas (->> (:jobs state)
+                    (keep (fn [[job-id {:keys [index leased-at completed-at receipt-cid] :as job}]]
+                            (when (= run-id (:run-id job))
+                              (let [receipt (when receipt-cid (read-object receipt-cid))
+                                    steps (:steps receipt)]
+                                {:index index
+                                 :queue-ms (elapsed-ms created leased-at)
+                                 :lease-to-completion-ms (elapsed-ms leased-at completed-at)
+                                 :steps (when (and (= job-id (:job-id receipt))
+                                                   (vector? steps) (<= (count steps) 64)
+                                                   (every? map? steps))
+                                          (mapv (fn [index {:keys [ms exit]}]
+                                                  {:index index
+                                                   :ms (elapsed-ms 0 ms)
+                                                   :exit (when (integer? exit) exit)})
+                                                (range) steps))}))))
+                    (sort-by :index)
+                    vec)}))
 
 (defn run-bundle
   "Everything tatara.core.verify/verify-run needs to re-check a run on a
