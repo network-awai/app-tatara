@@ -3,8 +3,8 @@
 #   tatara-runner-identity-N. A compromised pod holds one DID, never a quorum.
 # - Pods run in their own user namespace (hostUsers: false): root in the pod is an unprivileged uid on
 #   the node. Capabilities are dropped except CHOWN/DAC_OVERRIDE/FOWNER (apt at boot, chown of the job
-#   directory), SETUID/SETGID (to drop to the step user) and SYS_ADMIN (to unshare a network namespace);
-#   all of them are scoped to the pod's user namespace. Steps run as uid
+#   directory) and SETUID/SETGID (to drop to the step user), all scoped to the pod's user namespace. No
+#   SYS_ADMIN or NET_ADMIN: a :none step unshares its own user + network namespace as the step user. Steps run as uid
 #   20000 with no capabilities and no_new_privs, and cannot read the identity (0600, root).
 # - No tailscale, no NET_ADMIN, no /dev/net/tun, no DNS, no service account token. The pod can reach
 #   only the coordinator (10.96.79.90:8790) and the egress proxy (10.96.79.128:3128); see
@@ -97,7 +97,7 @@ spec:
             - {name: PROXY, value: "http://10.96.79.128:3128"}
           securityContext:
             allowPrivilegeEscalation: false
-            capabilities: {drop: [ALL], add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, SYS_ADMIN]}
+            capabilities: {drop: [ALL], add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]}
           volumeMounts:
             - {name: boot, mountPath: /boot}
             - {name: identity, mountPath: /identity, readOnly: true}
@@ -143,7 +143,7 @@ spec:
             - {name: PROXY, value: "http://10.96.79.128:3128"}
           securityContext:
             allowPrivilegeEscalation: false
-            capabilities: {drop: [ALL], add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, SYS_ADMIN]}
+            capabilities: {drop: [ALL], add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]}
           volumeMounts:
             - {name: boot, mountPath: /boot}
             - {name: identity, mountPath: /identity, readOnly: true}
@@ -189,7 +189,7 @@ spec:
             - {name: PROXY, value: "http://10.96.79.128:3128"}
           securityContext:
             allowPrivilegeEscalation: false
-            capabilities: {drop: [ALL], add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, SYS_ADMIN]}
+            capabilities: {drop: [ALL], add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]}
           volumeMounts:
             - {name: boot, mountPath: /boot}
             - {name: identity, mountPath: /identity, readOnly: true}

@@ -111,11 +111,12 @@
 
 (deftest steps-drop-to-the-step-user
   (let [u {:uid 20000 :gid 20000}]
-    (testing "inside the pod user namespace: unshare without uid mapping, then drop privileges"
+    (testing "inside the pod: drop to the step user, then unshare its own user and net namespace (AWAI-3799)"
       (let [w (core/wrap-network ["bb" "ci"] :none :unshare u)]
-        (is (= ["unshare" "--net" "--"] (subvec w 0 3)))
-        (is (= ["setpriv" "--reuid=20000" "--regid=20000" "--clear-groups" "--inh-caps=-all" "--no-new-privs" "--" "bb" "ci"]
-               (subvec w (- (count w) 9))))))
+        (is (= ["setpriv" "--reuid=20000" "--regid=20000" "--clear-groups" "--inh-caps=-all" "--no-new-privs" "--"
+                "unshare" "--user" "--map-root-user" "--net" "--"] (subvec w 0 12)))
+        (is (re-find #"ip link set lo up && exec setpriv --bounding-set=-all" (nth w 14)))
+        (is (= ["bb" "ci"] (subvec w (- (count w) 2))))))
     (testing ":fetch steps also drop privileges and get only the proxy"
       (is (= "setpriv" (first (core/wrap-network ["npm" "ci"] :fetch :unshare u))))
       (is (= "http://egress:3128" (get (core/fetch-env {:fetch {:proxy "http://egress:3128"}} :fetch) "HTTPS_PROXY")))

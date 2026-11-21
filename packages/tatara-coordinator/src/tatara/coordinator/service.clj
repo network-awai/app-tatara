@@ -156,6 +156,27 @@
                   act (enqueue act))
          :reply {:ok true :run-status (:status r3) :quorum q}}))))
 
+(defn rerun
+  "Reopen closed runs so they run again with fresh replica jobs (operator
+  action, e.g. after a runner-side fault; AWAI-3799). The run id is the hash of
+  its event, so the run is reset in place; the earlier outcome, entries and
+  submissions are kept under :previous. Pending or unknown runs are skipped.
+  Returns {:state s :reply {:rerun [ids] :skipped [ids]}}."
+  [state run-ids now]
+  (let [ok (filter #(when-let [r (get-in state [:runs %])] (not= :pending (:status r))) (distinct run-ids))]
+    {:state (reduce (fn [s id]
+                      (let [r (get-in s [:runs id])
+                            prev (select-keys r [:status :outcome :entries :submissions :quorum-at :expired-at :created])
+                            r2 (-> r (dissoc :outcome :quorum-at :expired-at :submissions)
+                                   (assoc :status :pending :entries [] :created now)
+                                   (update :previous (fnil conj []) prev))]
+                        (-> s
+                            (assoc-in [:runs id] r2)
+                            (update :jobs merge (lease/expand-replicas ctx id (:threshold r)))
+                            (enqueue (status-action id r2 "pending" "Tatara: rerun, waiting for runners")))))
+                    state ok)
+     :reply {:rerun (vec ok) :skipped (vec (remove (set ok) run-ids))}}))
+
 (defn expire-stale
   "Close every :pending run created at or before (- now ttl-ms) as :hard-error
   :expired and queue an error status for it. Its open replica jobs become
@@ -232,7 +253,9 @@
     (assoc (select-keys r [:repo :sha :ref :pipeline-cid :threshold :status :entries :outcome :created])
            :run-id run-id
            :replicas (->> (:jobs state) vals (filter #(= run-id (:run-id %)))
-                          (map #(select-keys % [:index :status :runner])) (sort-by :index) vec))))
+                          (map #(cond-> (select-keys % [:index :status :runner])
+                                  (:receipt-cid %) (assoc :log (str "/v1/runs/" run-id "/log/" (:index %)))))
+                          (sort-by :index) vec))))
 
 (defn- elapsed-ms [start end]
   (when (and (integer? start) (integer? end) (<= start end))

@@ -278,7 +278,8 @@
                     gh/snapshot! (constantly nil)
                     srv/submit! (fn [_ body] (swap! submitted conj body) {:run-id (get-in body [:event :sha])})]
         (gh/poll-once {} {:repos [repo]} (atom #{}))
-        (is (= ["main-sha" "evil-sha"] (mapv #(get-in % [:event :sha]) @submitted)))
+        ;; A set: worker threads left by start-loops! tests may see these redefs too.
+        (is (= #{"main-sha" "evil-sha"} (set (map #(get-in % [:event :sha]) @submitted))))
         (is (every? #(= e2e/pipeline (:pipeline %)) @submitted))
         (is (every? #(= (c/cid crypto/ctx e2e/pipeline) (get-in % [:event :pipeline-cid])) @submitted)))))
   (testing "without a readable default branch head nothing runs"

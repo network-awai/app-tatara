@@ -302,3 +302,22 @@
         (is (not (tatara.coordinator.store/has-blob? *root* sha256)))
         (is (= 0 (srv/gc-snapshots! s 5))))
       (finally (srv/stop! s)))))
+
+(deftest a-closed-run-can-be-rerun-and-logs-are-linked
+  (let [s (start) ca (cl/client (base s) a clock) cb (cl/client (base s) b clock)]
+    (try
+      (let [id (get-in (submit s {:event event :pipeline pipeline}) [:body :run-id])
+            ja (:body (cl/lease ca [:t2])) jb (:body (cl/lease cb [:t2]))]
+        (do-job ca ja "x") (do-job cb jb "x")
+        (is (= :reached (:status (get-run s id))))
+        (is (= (str "/v1/runs/" id "/log/0") (:log (first (:replicas (get-run s id))))))
+        (let [r (http/post (str (base s) "/v1/admin/rerun")
+                           {:headers {"authorization" (str "Bearer " admin)} :body (pr-str {:run-ids [id "nope"]}) :throw false})]
+          (is (= {:rerun [id] :skipped ["nope"]} (edn/read-string (:body r)))))
+        (let [v (get-run s id)]
+          (is (= :pending (:status v)))
+          (is (= [:queued :queued] (mapv :status (:replicas v)))))
+        (testing "the same runners can take the rerun"
+          (is (:job-id (:body (cl/lease ca [:t2])))))
+        (is (= :reached (:status (first (:previous (get-in @(:state s) [:runs id])))))))
+      (finally (srv/stop! s)))))

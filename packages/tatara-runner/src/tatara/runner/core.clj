@@ -57,17 +57,22 @@
 (defn wrap-network
   "A :network :none step runs in a fresh network namespace. Only loopback is
   brought up inside it, so steps can still use localhost (test servers).
-  With a :step-user the runner is root inside the pod's user namespace
-  (Kubernetes hostUsers: false): it unshares the net namespace itself and the
-  step then drops to the step user. Without one (VM runners) the unshare maps
-  the invoking user to root in a new user namespace, as before."
+  With a :step-user (Kubernetes pods, AWAI-3799) the runner first drops to
+  that uid, then the step unshares its own user and network namespace (no
+  NET_ADMIN or SYS_ADMIN needed in the pod), brings up loopback there and
+  clears its bounding set before exec, so it runs with no capabilities. Without
+  one (VM runners) the unshare maps the invoking user to root, as before."
   ([argv network enforcement] (wrap-network argv network enforcement nil))
   ([argv network enforcement step-user]
-   (let [argv (drop-privileges argv step-user)]
-     (if (and (= :none network) (= :unshare enforcement))
-       (into (if step-user ["unshare" "--net" "--"] ["unshare" "--net" "--map-root-user" "--"])
-             (into ["sh" "-c" "ip link set lo up && exec \"$@\"" "tatara-step"] argv))
-       argv))))
+   (let [lo ["sh" "-c" "ip link set lo up && exec \"$@\"" "tatara-step"]]
+     (cond
+       (not (and (= :none network) (= :unshare enforcement))) (drop-privileges argv step-user)
+       step-user (drop-privileges
+                  (into ["unshare" "--user" "--map-root-user" "--net" "--"
+                         "sh" "-c" "ip link set lo up && exec setpriv --bounding-set=-all --inh-caps=-all -- \"$@\""
+                         "tatara-step"] argv)
+                  step-user)
+       :else (into (into ["unshare" "--net" "--map-root-user" "--"] lo) argv)))))
 
 (defn fetch-env
   "Environment for a :fetch step: all HTTP(S) through the egress proxy."
