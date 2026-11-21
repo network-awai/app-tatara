@@ -9,6 +9,7 @@ next to the Mac mini runners and take part in the same quorum.
 | `tatara-runner.yaml` | Boot ConfigMap and one StatefulSet per runner identity (`tatara-runner-0..2`, replicas 0 or 1) |
 | `scaler.yaml` | Queue-based scaler (Deployment `tatara-scaler`; RBAC limited to `statefulsets/scale` of `tatara-runner-0..2`) |
 | `egress.yaml` | Egress proxy (tinyproxy) with the host allowlist; ClusterIP 10.96.79.128:3128 |
+| `negative-control.sh` | Step sandbox probes, run in a live runner pod (see below) |
 | `network-policy.yaml` | Default deny; what runner, proxy, coordinator and scaler pods may reach |
 | `../../../tatara-coordinator/deploy/vke/coordinator.yaml` | The coordinator (system pool, 20 Gi Retain volume, ClusterIP 10.96.79.90:8790, tailscale sidecar) |
 | `provision-host.sh` | Same pinned tools for a plain Linux x86_64 host with systemd, if a VM is used instead |
@@ -33,6 +34,14 @@ next to the Mac mini runners and take part in the same quorum.
 - Steps run as uid 20000 with no capabilities and `no_new_privs`, through `setpriv`. They cannot read the identity (0600, root).
 - `:network :none` steps drop to uid 20000, then unshare their own user and network namespace (only loopback) and clear their bounding set.
 - The root filesystem is not read-only: the boot installs packages, because there is no image registry (D2).
+
+**Why the pod keeps SYS_ADMIN, and how it is checked.**
+- SYS_ADMIN is in the container spec only because containerd's RuntimeDefault seccomp profile allows `unshare(2)` and namespace-creating `clone(2)` only to containers that hold it. Without it, every `:none` step failed with EPERM (2026-11-21).
+- It is scoped to the pod's user namespace (root there is an unprivileged host uid range). The step itself runs with CapEff 0, CapBnd 0 and `no_new_privs`.
+- A custom `Localhost` seccomp profile could drop it. That profile would be RuntimeDefault plus an unconditional allow of `unshare`, and of `clone`/`clone3` with `CLONE_NEWUSER|CLONE_NEWNET`.
+- On VKE the profile file has to be on every node under `/var/lib/kubelet/seccomp/`. Getting it there needs a privileged DaemonSet with a hostPath or a custom node image. Either one adds more privilege than it removes, so it is not done.
+- `negative-control.sh` runs probes as a step, built by the runner's own `wrap-network`. All 12 must pass: no capabilities, no `setns` into the pod's net, mnt or user namespace, identity and runner environment unreadable, no link creation, only loopback, no mount, and a nested user namespace cannot enter the pod netns.
+- Run as the runner (outside the wrapper), the same probes report 7 failures. This shows they detect a broken sandbox.
 
 **Network.**
 - There is no tailscale, `NET_ADMIN` or `/dev/net/tun` on runner pods.
