@@ -143,6 +143,10 @@
                 (reply 400 {:error :bad-run-ids})
                 (reply 200 (mutate! srv #(svc/rerun % ids now))))))
 
+          (and (= m :get) (= uri "/v1/metrics/dora"))
+          (let [days (or (some-> (second (re-find #"(?:^|&)days=([0-9]+)" (or (:query-string req) ""))) parse-long) 7)]
+            (reply 200 {:window-days days :at now :repos (svc/dora @state now (* days 86400000))}))
+
           (and (= m :get) (= uri "/v1/queue"))
           (let [tier (keyword (or (second (re-find #"(?:^|&)tier=([a-z0-9-]+)" (or (:query-string req) ""))) "t2"))]
             (reply 200 (svc/queue-depth @state now tier)))

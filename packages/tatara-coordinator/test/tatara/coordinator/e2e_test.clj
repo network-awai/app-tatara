@@ -321,3 +321,21 @@
           (is (:job-id (:body (cl/lease ca [:t2])))))
         (is (= :reached (:status (first (:previous (get-in @(:state s) [:runs id])))))))
       (finally (srv/stop! s)))))
+
+(deftest dora-baselines-from-default-branch-runs
+  (let [h 3600000
+        pass (fn [t] {:repo "r" :ref "refs/heads/main" :created t :status :reached
+                      :outcome {:verdict-cid "v"} :entries [{:verdict-cid "v" :result :passed}]})
+        fail (fn [t] {:repo "r" :ref "refs/heads/main" :created t :status :reached
+                      :outcome {:verdict-cid "v"} :entries [{:verdict-cid "v" :result :failed}]})
+        st {:runs {"1" (pass h) "2" (fail (* 2 h)) "3" (fail (* 3 h)) "4" (pass (* 5 h))
+                   "5" {:repo "r" :ref "refs/heads/main" :created (* 6 h) :status :hard-error}
+                   "pr" (fail (* 2 h)) "old" (pass (- h))
+                   "p" {:repo "r" :ref "refs/heads/main" :created (* 7 h) :status :pending}}}
+        st (assoc-in st [:runs "pr" :ref] "refs/pull/1/head")
+        d (get (svc/dora st (* 8 h) (* 8 h)) "r")]
+    (is (= 5 (:changes d)))
+    (is (= 3 (:failed d)))
+    (is (= 0.6 (:change-failure-rate d)))
+    (testing "restore runs from the first failing run to the next passing one; an unrestored failure is open"
+      (is (= {:count 1 :median-ms (* 3 h) :open 1} (:restore d))))))

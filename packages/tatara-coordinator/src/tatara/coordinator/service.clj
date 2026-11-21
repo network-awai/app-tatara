@@ -224,6 +224,50 @@
                    sha)))
          sort vec)))
 
+(defn- run-result [r]
+  (case (:status r)
+    :reached (some #(when (= (get-in r [:outcome :verdict-cid]) (:verdict-cid %)) (:result %)) (:entries r))
+    :hard-error :failed
+    nil))
+
+(defn- median [xs]
+  (when (seq xs) (let [v (vec (sort xs)) n (count v)]
+                   (if (odd? n) (v (quot n 2)) (quot (+ (v (dec (quot n 2))) (v (quot n 2))) 2)))))
+
+(defn dora
+  "DORA-style baselines per repo over default-branch runs created in
+  [now - window-ms, now] (AWAI-3799). Tatara sees verified merges, not deploys:
+  - :changes, :changes-per-day: closed default-branch runs (a deploy-frequency
+    proxy; a deploy pipeline would report its own events);
+  - :change-failure-rate: failed or hard-error over closed runs (an expired run
+    counts as failed: no verdict reached);
+  - :restore-ms: for each failing run, time until the next passing run of the
+    same repo (median and count; :open when not yet restored).
+  A rerun keeps only its latest outcome."
+  [state now window-ms]
+  (let [main? #(re-find #"^refs/heads/" (str (:ref %)))
+        runs (->> (vals (:runs state))
+                  (filter #(and (main? %) (integer? (:created %)) (<= (- now window-ms) (:created %) now)
+                                (not= :pending (:status %))))
+                  (sort-by :created))
+        days (/ window-ms 86400000.0)]
+    (into (sorted-map)
+          (for [[repo rs] (group-by :repo runs)]
+            (let [res (map run-result rs)
+                  fails (count (filter #(not= :passed %) res))
+                  restores (loop [[r & more] rs out [] open 0]
+                             (cond (nil? r) {:ms out :open open}
+                                   (= :passed (run-result r)) (recur more out open)
+                                   :else (if-let [ok (first (filter #(= :passed (run-result %)) more))]
+                                           (recur (drop-while #(not= :passed (run-result %)) more)
+                                                  (conj out (- (:created ok) (:created r))) open)
+                                           {:ms out :open (inc open)})))]
+              [repo {:changes (count rs)
+                     :changes-per-day (/ (Math/round (* 100.0 (/ (count rs) days))) 100.0)
+                     :failed fails
+                     :change-failure-rate (when (seq rs) (/ (Math/round (* 1000.0 (/ fails (count rs)))) 1000.0))
+                     :restore {:count (count (:ms restores)) :median-ms (median (:ms restores)) :open (:open restores)}}])))))
+
 (defn queue-depth
   "Demand for runners of tier with no required toolchain: replica jobs of
   :pending runs that are :queued or whose lease expired (:queued), and those
