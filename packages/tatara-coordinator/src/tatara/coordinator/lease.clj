@@ -82,15 +82,17 @@
 (defn- nonce [] (let [b (byte-array 16)] (.nextBytes (SecureRandom.) b) (apply str (map #(format "%02x" (bit-and % 0xff)) b))))
 
 (defn request-lease
-  "Ask the minter for a token. Returns {:token :expires-ms :lease-id}."
-  [{:keys [url identity owner repositories permissions ttl-s]} now-ms]
+  "Ask the minter for a token. Returns {:token :expires-ms :lease-id}.
+  :timeout-ms (default 30 s) bounds the request; a minter with a large vault
+  on a loaded host took 204 s per lease on 2026-11-21 (AWAI-3799)."
+  [{:keys [url identity owner repositories permissions ttl-s timeout-ms]} now-ms]
   (let [body (json/generate-string {:format format-id :requester (:did identity) :x25519 (:x25519-public identity)
                                     :issuer "github" :owner owner :repositories repositories
                                     :permissions permissions :ttl_s (or ttl-s 3600) :nonce (nonce) :ts now-ms})
         res (http/post (str url "/v1/lease") {:headers {"content-type" "application/json"
                                                          "x-kagitaba-signature" (crypto/sign identity body)}
                                                :body body :throw false
-                                               :client @client :timeout request-timeout-ms})
+                                               :client @client :timeout (or timeout-ms request-timeout-ms)})
         out (try (json/parse-string (:body res) true) (catch Exception _ nil))]
     (when-not (= 200 (:status res))
       (throw (ex-info "lease refused" {:status (:status res) :error (:error out)})))
