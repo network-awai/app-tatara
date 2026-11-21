@@ -116,7 +116,7 @@
           (is (= 1 (count (:runs @(:state s)))))
           (is (= ["pending"] (mapv :state @posted)))
           (finally
-            (doseq [t threads] (.interrupt t) (.join t 1000))
+            (doseq [t threads] (.interrupt t) (.join t 5000))
             (srv/stop! s) ((:stop fake)) (fs/delete-tree root)))))))
 
 (deftest a-timed-out-snapshot-is-retried-without-skipping-later-heads
@@ -165,7 +165,7 @@
           (is (= true (deref delivered 5000 false)))
           (finally
             (deliver release true)
-            (doseq [t threads] (.interrupt t) (.join t 1000))))))))
+            (doseq [t threads] (.interrupt t) (.join t 5000))))))))
 
 (deftest unreadable-pull-requests-are-an-error-not-silence
   (testing "a 403 on the PR list (private repo, lease without pull_requests: read) is reported"

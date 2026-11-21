@@ -6,6 +6,7 @@
             [clojure.string :as str]
             [org.httpkit.server :as hs]
             [tatara.coordinator.crypto :as crypto]
+            [tatara.coordinator.lease]
             [tatara.coordinator.service :as svc]
             [tatara.coordinator.store :as store])
   (:import (java.security SecureRandom)))
@@ -146,6 +147,11 @@
           (and (= m :get) (= uri "/v1/metrics/dora"))
           (let [days (or (some-> (second (re-find #"(?:^|&)days=([0-9]+)" (or (:query-string req) ""))) parse-long) 7)]
             (reply 200 {:window-days days :at now :repos (svc/dora @state now (* days 86400000))}))
+
+          ;; Operator health: the last minter lease outcome per minter (AWAI-3820).
+          (and (= m :get) (= uri "/v1/health"))
+          (let [ms @tatara.coordinator.lease/status]
+            (reply 200 {:ok (every? #(= :ok (:state %)) (vals ms)) :minter ms :at now}))
 
           (and (= m :get) (= uri "/v1/queue"))
           (let [tier (keyword (or (second (re-find #"(?:^|&)tier=([a-z0-9-]+)" (or (:query-string req) ""))) "t2"))]

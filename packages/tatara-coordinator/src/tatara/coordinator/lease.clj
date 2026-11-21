@@ -100,9 +100,31 @@
      :expires-ms (.toEpochMilli (Instant/parse (:expires_at out)))
      :lease-id (:lease_id out)}))
 
+(def status
+  "Outcome of the most recent minter lease request, per minter URL (AWAI-3820):
+  {url {:state :ok|:minter-unreachable|:minter-timeout|:lease-refused|:error
+        :at ms :ms latency :detail text}}. Served by GET /v1/health."
+  (atom {}))
+
+(defn classify
+  "A lease failure, as an operator-readable state. A minter whose keychain is
+  locked cannot open its vault and does not listen, so it shows as
+  :minter-unreachable (connection refused), not as a long timeout."
+  [^Throwable e]
+  (let [chain (take-while some? (iterate #(.getCause ^Throwable %) e))
+        has (fn [cls] (some #(instance? cls %) chain))]
+    (cond
+      (has java.net.ConnectException) {:state :minter-unreachable
+                                       :detail "connection refused: minter down or its keychain locked (run security unlock-keychain on the minter host)"}
+      (or (has java.net.http.HttpTimeoutException) (has java.net.SocketTimeoutException)) {:state :minter-timeout :detail "no answer within the lease timeout"}
+      (= "lease refused" (ex-message e)) {:state :lease-refused :detail (pr-str (ex-data e))}
+      :else {:state :error :detail (str (.getSimpleName (class e)) ": " (ex-message e))})))
+
 (defn token-provider
   "A zero-argument fn returning a valid token, leasing a new one when the
-  cached one is within five minutes of expiry. clock is injectable for tests."
+  cached one is within five minutes of expiry. clock is injectable for tests.
+  Every lease attempt updates `status`; a failure is also logged once per
+  attempt with its classification."
   [cfg & [{:keys [clock] :or {clock #(System/currentTimeMillis)}}]]
   (let [cache (atom nil)]
     (fn []
@@ -110,6 +132,15 @@
         (let [now (clock) c @cache]
           (if (and c (< now (- (:expires-ms c) refresh-before-ms)))
             (:token c)
-            (:token (reset! cache (request-lease cfg now)))))))))
+            (let [t0 (System/currentTimeMillis)]
+              (try
+                (let [r (request-lease cfg now)]
+                  (swap! status assoc (:url cfg) {:state :ok :at now :ms (- (System/currentTimeMillis) t0)})
+                  (:token (reset! cache r)))
+                (catch Exception e
+                  (let [k (classify e)]
+                    (swap! status assoc (:url cfg) (assoc k :at now :ms (- (System/currentTimeMillis) t0)))
+                    (println "minter" (:url cfg) (name (:state k)) "-" (:detail k))
+                    (throw e)))))))))))
 
 (defn read-identity [path] (edn/read-string (slurp path)))
