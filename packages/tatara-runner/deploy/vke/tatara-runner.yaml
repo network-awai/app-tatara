@@ -2,13 +2,16 @@
 # - One StatefulSet (replicas 0 or 1) per runner identity: tatara-runner-N mounts only Secret
 #   tatara-runner-identity-N. A compromised pod holds one DID, never a quorum.
 # - Pods run in their own user namespace (hostUsers: false): root in the pod is an unprivileged uid on
-#   the node. Capabilities are dropped except SETUID/SETGID (to drop to the step user) and SYS_ADMIN
-#   (to unshare a network namespace); all three are scoped to the pod's user namespace. Steps run as uid
+#   the node. Capabilities are dropped except CHOWN/DAC_OVERRIDE/FOWNER (apt at boot, chown of the job
+#   directory), SETUID/SETGID (to drop to the step user) and SYS_ADMIN (to unshare a network namespace);
+#   all of them are scoped to the pod's user namespace. Steps run as uid
 #   20000 with no capabilities and no_new_privs, and cannot read the identity (0600, root).
 # - No tailscale, no NET_ADMIN, no /dev/net/tun, no DNS, no service account token. The pod can reach
 #   only the coordinator (10.96.79.90:8790) and the egress proxy (10.96.79.128:3128); see
 #   network-policy.yaml. Downloads at boot and :fetch steps go through the proxy's allowlist.
-# - Only on the tatara-ci-runners pool (taint tatara.network/runner=ci), one runner per node.
+# - Only on the runner pool (label tatara.network/role=runner, taint tatara.network/runner=ci), one runner
+#   per node. The pool is vc2-1c-2gb, min 1 (VKE pools cannot scale up from 0), max 3; 800m CPU allocatable,
+#   350m taken by DaemonSets and often 250m by calico-typha, so a runner requests 150m (burst to 1 CPU).
 # - The scaler (scaler.yaml) sets each StatefulSet to 0 or 1.
 apiVersion: v1
 kind: ConfigMap
@@ -94,11 +97,11 @@ spec:
             - {name: PROXY, value: "http://10.96.79.128:3128"}
           securityContext:
             allowPrivilegeEscalation: false
-            capabilities: {drop: [ALL], add: [SETUID, SETGID, SYS_ADMIN]}
+            capabilities: {drop: [ALL], add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, SYS_ADMIN]}
           volumeMounts:
             - {name: boot, mountPath: /boot}
             - {name: identity, mountPath: /identity, readOnly: true}
-          resources: {requests: {cpu: "1500m", memory: 3Gi}, limits: {cpu: "3500m", memory: 6Gi}}
+          resources: {requests: {cpu: 150m, memory: 1Gi}, limits: {cpu: "1", memory: 1536Mi}}
       volumes:
         - {name: boot, configMap: {name: tatara-runner-boot}}
         - {name: identity, secret: {secretName: tatara-runner-identity-0, defaultMode: 0400}}
@@ -140,11 +143,11 @@ spec:
             - {name: PROXY, value: "http://10.96.79.128:3128"}
           securityContext:
             allowPrivilegeEscalation: false
-            capabilities: {drop: [ALL], add: [SETUID, SETGID, SYS_ADMIN]}
+            capabilities: {drop: [ALL], add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, SYS_ADMIN]}
           volumeMounts:
             - {name: boot, mountPath: /boot}
             - {name: identity, mountPath: /identity, readOnly: true}
-          resources: {requests: {cpu: "1500m", memory: 3Gi}, limits: {cpu: "3500m", memory: 6Gi}}
+          resources: {requests: {cpu: 150m, memory: 1Gi}, limits: {cpu: "1", memory: 1536Mi}}
       volumes:
         - {name: boot, configMap: {name: tatara-runner-boot}}
         - {name: identity, secret: {secretName: tatara-runner-identity-1, defaultMode: 0400}}
@@ -186,11 +189,11 @@ spec:
             - {name: PROXY, value: "http://10.96.79.128:3128"}
           securityContext:
             allowPrivilegeEscalation: false
-            capabilities: {drop: [ALL], add: [SETUID, SETGID, SYS_ADMIN]}
+            capabilities: {drop: [ALL], add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, SYS_ADMIN]}
           volumeMounts:
             - {name: boot, mountPath: /boot}
             - {name: identity, mountPath: /identity, readOnly: true}
-          resources: {requests: {cpu: "1500m", memory: 3Gi}, limits: {cpu: "3500m", memory: 6Gi}}
+          resources: {requests: {cpu: 150m, memory: 1Gi}, limits: {cpu: "1", memory: 1536Mi}}
       volumes:
         - {name: boot, configMap: {name: tatara-runner-boot}}
         - {name: identity, secret: {secretName: tatara-runner-identity-2, defaultMode: 0400}}
