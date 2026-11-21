@@ -25,7 +25,7 @@ data:
     ORD=${POD_NAME%-0}; ORD=${ORD##*-}
     export DEBIAN_FRONTEND=noninteractive http_proxy="$PROXY" https_proxy="$PROXY"
     apt-get -o Acquire::http::Proxy="$PROXY" update -q >/dev/null
-    apt-get -o Acquire::http::Proxy="$PROXY" install -y -q git curl xz-utils ca-certificates util-linux iproute2 openssl >/dev/null
+    apt-get -o Acquire::http::Proxy="$PROXY" install -y -q git curl xz-utils ca-certificates util-linux iproute2 openssl python3 >/dev/null
     T=$(mktemp -d); cd "$T"
     check256() { echo "$2  $1" | sha256sum -c - >/dev/null || { echo "digest mismatch: $1" >&2; exit 3; }; }
     check512() { [ "$(openssl dgst -sha512 -binary "$1" | base64 -w0)" = "$2" ] || { echo "digest mismatch: $1" >&2; exit 3; }; }
