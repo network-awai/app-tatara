@@ -68,7 +68,7 @@
         (cond
           (and (= m :post) (= uri "/v1/lease"))
           (let [b (signed-body req now)
-                r (mutate! srv #(svc/lease-job cfg % b (token) now))]
+                r (mutate! srv #(svc/lease-job cfg % b (token) now (:remote-addr req)))]
             (reply (status-of r) r))
 
           (and (= m :post) (= uri "/v1/heartbeat"))
@@ -115,7 +115,7 @@
 
           (and (= m :post) (= uri "/v1/complete"))
           (let [b (signed-body req now)
-                r (mutate! srv #(svc/complete cfg % (dissoc b :ts) now (partial cas-has? root)))]
+                r (mutate! srv #(svc/complete cfg % (dissoc b :ts) now (partial cas-has? root) (:remote-addr req)))]
             (reply (status-of r) r))
 
           (and (= m :post) (= uri "/v1/runs"))
@@ -191,6 +191,13 @@
   "Close :pending runs older than ttl-ms (svc/expire-stale). Persisted."
   [srv ttl-ms]
   (mutate! srv #(svc/expire-stale % ((:clock srv)) ttl-ms)))
+
+(defn gc-snapshots!
+  "Delete source-snapshot blobs of runs closed longer than retention-ms ago
+  (svc/collectable-snapshots). Returns the number of blobs removed."
+  [srv retention-ms]
+  (let [shas (svc/collectable-snapshots @(:state srv) ((:clock srv)) retention-ms)]
+    (count (filter #(store/delete-blob! (:root srv) %) shas))))
 
 (defn mark-delivered!
   "Record that an outbox action reached its destination. Persisted."

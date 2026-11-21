@@ -70,27 +70,41 @@
   (try {:demand (read-demand)}
        (catch Exception e {:demand 0 :error (ex-message e) :data (ex-data e)})))
 
+(defn targets
+  "One runner identity per StatefulSet (AWAI-3799): n replicas means the first
+  n StatefulSets at 1 and the rest at 0. Returns {name 0|1}."
+  [statefulsets n]
+  (into {} (map-indexed (fn [i sts] [sts (if (< i n) 1 0)]) statefulsets)))
+
 (defn -main
-  "bb scale SCALER.edn — {:coordinator url :namespace ns :statefulset name
-  :min-replicas 0 :max-replicas 3 :idle-seconds 600 :poll-seconds 30}"
+  "bb scale SCALER.edn — {:coordinator url :namespace ns
+  :statefulsets [\"tatara-runner-0\" ...] :min-replicas 0 :max-replicas 3
+  :idle-seconds 600 :poll-seconds 30}. :statefulset name (one StatefulSet with
+  n replicas) is still accepted for the old layout."
   [config-file]
-  (let [{:keys [coordinator namespace statefulset poll-seconds idle-seconds] :as cfg}
+  (let [{:keys [coordinator namespace statefulset statefulsets poll-seconds idle-seconds] :as cfg}
         (merge {:min-replicas 0 :max-replicas 3 :idle-seconds 600 :poll-seconds 30}
                (edn/read-string (slurp config-file)))
-        path (str "/apis/apps/v1/namespaces/" namespace "/statefulsets/" statefulset "/scale")
-        opts (assoc cfg :idle-ms (* 1000 idle-seconds))]
-    (println "scaler" statefulset (select-keys cfg [:min-replicas :max-replicas :idle-seconds]))
+        path #(str "/apis/apps/v1/namespaces/" namespace "/statefulsets/" % "/scale")
+        names (vec (or statefulsets [statefulset]))
+        split? (some? statefulsets)
+        opts (cond-> (assoc cfg :idle-ms (* 1000 idle-seconds))
+               split? (update :max-replicas min (count names)))]
+    (println "scaler" names (select-keys opts [:min-replicas :max-replicas :idle-seconds]))
     (loop [idle-since nil]
       (let [next-idle
             (try
-              (let [current (get-in (kube "GET" path) [:spec :replicas] 0)
+              (let [now-counts (into {} (map (fn [n] [n (get-in (kube "GET" (path n)) [:spec :replicas] 0)])) names)
+                    current (reduce + (vals now-counts))
                     {d :demand err :error data :data} (observed-demand #(queue coordinator))
                     _ (when err (println (str (java.time.Instant/now)) "coordinator:" err (pr-str data)))
                     {:keys [replicas idle-since]} (decide opts {:current current :demand d
                                                                 :idle-since idle-since
-                                                                :now (System/currentTimeMillis)})]
+                                                                :now (System/currentTimeMillis)})
+                    want (if split? (targets names replicas) {(first names) replicas})]
+                (doseq [[n r] want :when (not= r (get now-counts n))]
+                  (kube "PATCH" (path n) {:spec {:replicas r}}))
                 (when (not= replicas current)
-                  (kube "PATCH" path {:spec {:replicas replicas}})
                   (println (str (java.time.Instant/now)) "demand" d "replicas" current "->" replicas))
                 idle-since)
               ;; Kubernetes API errors leave the replica count as it is.

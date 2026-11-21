@@ -1,7 +1,7 @@
 (ns tatara.runner.core
   "Fleet runner for tier T2 (Linux VM). One job at a time:
   lease -> download the source snapshot from the coordinator -> check that the
-  checked-out pipeline hashes to the leased pipeline CID -> run argv steps ->
+  leased pipeline hashes to its CID -> run argv steps ->
   hash declared artifacts on the host -> upload -> sign and complete.
 
   The VM is the isolation boundary. :network :none steps are wrapped in a new
@@ -19,8 +19,10 @@
 (def max-steps 64)
 
 (defn validate
-  "T2 job rules: tier, argv-only steps, network :none or :fetch."
-  [{:keys [pipeline pipeline-cid]}]
+  "T2 job rules: tier, argv-only steps, network :none or :fetch. :fetch runs
+  only on a runner configured with a :fetch egress proxy (allowlist); without
+  one the job is refused instead of getting the host's network (AWAI-3799)."
+  [{:keys [pipeline pipeline-cid]} & [cfg]]
   (let [steps (:steps pipeline)]
     (cond
       (not= pipeline-cid (c/cid crypto/ctx pipeline)) {:error :pipeline-cid-mismatch}
@@ -28,6 +30,7 @@
       (or (empty? steps) (> (count steps) max-steps)) {:error :bad-step-count}
       (not (every? #(and (vector? %) (seq %) (every? string? %)) steps)) {:error :not-argv}
       (not (contains? #{:none :fetch} (:network pipeline :none))) {:error :network-not-allowed}
+      (and (= :fetch (:network pipeline)) (not (get-in cfg [:fetch :proxy]))) {:error :fetch-not-allowed}
       (not (every? #(and (string? %) (not (fs/absolute? %)) (not (re-find #"(^|/)\.\.(/|$)" %)))
                    (:artifacts pipeline))) {:error :bad-artifact-path}
       :else {:ok true})))
@@ -41,28 +44,56 @@
       (when-not (zero? (:exit r)) (throw (ex-info "snapshot extraction failed" {:err (:err r)}))))
     (str src)))
 
+(defn drop-privileges
+  "With :step-user {:uid :gid}, the step runs under that uid with no
+  capabilities and no_new_privs, so it cannot read the runner's identity
+  (mode 0600, owned by the runner) or regain privilege (AWAI-3799)."
+  [argv step-user]
+  (if-let [{:keys [uid gid]} step-user]
+    (into ["setpriv" (str "--reuid=" uid) (str "--regid=" (or gid uid)) "--clear-groups"
+           "--inh-caps=-all" "--no-new-privs" "--"] argv)
+    argv))
+
 (defn wrap-network
   "A :network :none step runs in a fresh network namespace. Only loopback is
-  brought up inside it, so steps can still use localhost (test servers)."
-  [argv network enforcement]
-  (if (and (= :none network) (= :unshare enforcement))
-    (into ["unshare" "--net" "--map-root-user" "--"
-           "sh" "-c" "ip link set lo up && exec \"$@\"" "tatara-step"] argv)
-    argv))
+  brought up inside it, so steps can still use localhost (test servers).
+  With a :step-user the runner is root inside the pod's user namespace
+  (Kubernetes hostUsers: false): it unshares the net namespace itself and the
+  step then drops to the step user. Without one (VM runners) the unshare maps
+  the invoking user to root in a new user namespace, as before."
+  ([argv network enforcement] (wrap-network argv network enforcement nil))
+  ([argv network enforcement step-user]
+   (let [argv (drop-privileges argv step-user)]
+     (if (and (= :none network) (= :unshare enforcement))
+       (into (if step-user ["unshare" "--net" "--"] ["unshare" "--net" "--map-root-user" "--"])
+             (into ["sh" "-c" "ip link set lo up && exec \"$@\"" "tatara-step"] argv))
+       argv))))
+
+(defn fetch-env
+  "Environment for a :fetch step: all HTTP(S) through the egress proxy."
+  [{:keys [fetch]} network]
+  (if (and (= :fetch network) (:proxy fetch))
+    (let [px (:proxy fetch)]
+      {"HTTP_PROXY" px "HTTPS_PROXY" px "http_proxy" px "https_proxy" px
+       "NO_PROXY" "" "no_proxy" "" "npm_config_proxy" px "npm_config_https_proxy" px})
+    {}))
 
 (defn run-steps
   "Run steps in order in dir; stop at the first non-zero exit or the deadline.
   Returns {:steps [{:argv :exit :ms}] :failed? bool}."
-  [{:keys [network-enforcement env]} pipeline dir log-file]
+  [{:keys [network-enforcement env step-user] :as cfg} pipeline dir log-file]
   (let [deadline (+ (System/currentTimeMillis) (* 1000 (:timeout-seconds pipeline 3600)))
         home (str (fs/create-dirs (fs/path dir ".tatara-home")))
         tmp (str (fs/create-dirs (fs/path dir ".tatara-tmp")))
-        base-env (merge {"PATH" (System/getenv "PATH") "HOME" home "TMPDIR" tmp "LANG" "C.UTF-8"} env)]
+        base-env (merge {"PATH" (System/getenv "PATH") "HOME" home "TMPDIR" tmp "LANG" "C.UTF-8"} env
+                        (fetch-env cfg (:network pipeline :none)))]
+    (when-let [{:keys [uid gid]} step-user]
+      (p/shell "chown" "-R" (str uid ":" (or gid uid)) (str dir)))
     (loop [[argv & more] (:steps pipeline) done []]
       (if-not argv
         {:steps done :failed? false}
         (let [t0 (System/currentTimeMillis)
-              full (wrap-network argv (:network pipeline :none) network-enforcement)
+              full (wrap-network argv (:network pipeline :none) network-enforcement step-user)
               proc (apply p/process {:dir dir :env base-env
                                      :out :append :out-file (fs/file log-file) :err :out} full)
               left (- deadline t0)
@@ -87,7 +118,7 @@
   "Execute a leased job and submit the verdict. Returns the coordinator reply,
   or {:refused reason} when the job is not run."
   [{:keys [work] :as cfg} c job]
-  (let [chk (validate job)]
+  (let [chk (validate job cfg)]
     (if (:error chk)
       {:refused (:error chk)}
       (let [dir (str (fs/create-dirs (fs/path work (str "job-" (subs (crypto/sha256-hex (:job-id job)) 0 16)))))
@@ -97,11 +128,11 @@
           (nil? snap) {:refused :no-snapshot}
           (not (:bytes blob)) {:refused :snapshot-unavailable :detail (dissoc blob :bytes)}
           :else
-          (let [src (extract! (:bytes blob) dir)
-                pfile (fs/file src ".tatara" "pipeline.edn")
-                checked (when (fs/exists? pfile) (edn/read-string (slurp pfile)))]
-            (if (not= (:pipeline-cid job) (some->> checked (c/cid crypto/ctx)))
-              {:refused :checkout-pipeline-mismatch}
+          ;; The leased pipeline is the trusted one (the default branch's, AWAI-3799);
+          ;; validate checked it against its CID. A PR's own .tatara/pipeline.edn is
+          ;; not used, so it may differ from the checkout.
+          (let [src (extract! (:bytes blob) dir)]
+            (do
               (let [log (fs/file dir "log.txt")
                     hb (future (loop [] (Thread/sleep (long (max 1000 (quot (:ttl-ms job 120000) 3))))
                                  (cl/heartbeat c job) (recur)))
