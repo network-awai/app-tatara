@@ -49,7 +49,7 @@
         verdict {:source (:sha job) :pipeline-cid (:pipeline-cid job) :result :passed
                  :artifacts [{:name "out" :cid (get-in art [:body :cid])}]}
         vobj (cl/put-object c job verdict)
-        receipt (if skip-receipt? {:body {:cid "cid:sha256:00"}} (cl/put-object c job {:job-id (:job-id job) :steps [{:argv ["make" "test"] :exit 0}]}))
+        receipt (if skip-receipt? {:body {:cid "cid:sha256:00"}} (cl/put-object c job {:job-id (:job-id job) :steps [{:argv ["make" "test"] :exit 0 :ms 7}]}))
         snap (cl/put-object c job {:sha (:sha job)})]
     (cl/complete c job verdict (get-in vobj [:body :cid]) (get-in receipt [:body :cid]) (get-in snap [:body :cid]))))
 
@@ -76,6 +76,29 @@
           (is (= #{"pending" "success"} (set (map :state acts))))
           (is (every? #(= "tatara/ci" (:context %)) acts))))
       (finally (srv/stop! s)))))
+
+(deftest timings-survive-restart-and-omit-argv
+  (let [s (start) ca (cl/client (base s) a clock) cb (cl/client (base s) b clock)
+        run-id (get-in (submit s {:event event :pipeline pipeline}) [:body :run-id])]
+    (try
+      (swap! now + 10)
+      (let [ja (:body (cl/lease ca [:t2]))]
+        (swap! now + 30)
+        (do-job ca ja "same"))
+      (is (nil? (get-in (get-run s run-id) [:timings :quorum-ms])))
+      (let [jb (:body (cl/lease cb [:t2]))]
+        (swap! now + 60)
+        (do-job cb jb "same"))
+      (finally (srv/stop! s)))
+    (let [restarted (start)]
+      (try
+        (is (= {:quorum-ms 100
+                :replicas [{:index 0 :queue-ms 10 :lease-to-completion-ms 30
+                            :steps [{:index 0 :ms 7 :exit 0}]}
+                           {:index 1 :queue-ms 40 :lease-to-completion-ms 60
+                            :steps [{:index 0 :ms 7 :exit 0}]}]}
+               (:timings (get-run restarted run-id))))
+        (finally (srv/stop! restarted))))))
 
 (deftest split-verdict-is-a-hard-error
   (let [s (start) ca (cl/client (base s) a clock) cb (cl/client (base s) b clock)]

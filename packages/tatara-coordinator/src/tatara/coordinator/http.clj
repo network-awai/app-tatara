@@ -134,8 +134,11 @@
               (reply 200 b) (reply 404 {:error :unknown-run})))
 
           (and (= m :get) (str/starts-with? uri "/v1/runs/"))
-          (if-let [v (svc/run-view @state (subs uri (count "/v1/runs/")))]
-            (reply 200 v) (reply 404 {:error :unknown-run}))
+          (let [snapshot @state
+                id (subs uri (count "/v1/runs/"))]
+            (if-let [v (svc/run-view snapshot id)]
+              (reply 200 (assoc v :timings (svc/run-timings snapshot id #(store/read-object root %))))
+              (reply 404 {:error :unknown-run})))
 
           (and (= m :get) (str/starts-with? uri "/v1/object/"))
           (if-let [v (store/read-object root (subs uri (count "/v1/object/")))]
