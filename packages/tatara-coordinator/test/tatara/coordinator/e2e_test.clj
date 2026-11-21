@@ -218,3 +218,36 @@
       (is (= 200 (:status (submit s {:event event :pipeline pipeline}))))
       (is (= pipeline (get-in (cl/lease cb [:t2]) [:body :pipeline])))
       (finally (srv/stop! s)))))
+
+(defn- get-queue [s] (edn/read-string (:body (http/get (str (base s) "/v1/queue?tier=t2")))))
+
+(defn- expire [s token ms]
+  (let [r (http/post (str (base s) "/v1/admin/expire")
+                     {:headers {"authorization" (str "Bearer " token)} :body (pr-str {:older-than-ms ms}) :throw false})]
+    {:status (:status r) :body (edn/read-string (:body r))}))
+
+(deftest queue-counts-live-demand-and-stale-runs-expire
+  (let [s (start) ca (cl/client (base s) a clock)]
+    (try
+      (let [run-id (get-in (submit s {:event event :pipeline pipeline}) [:body :run-id])]
+        (is (= {:tier :t2 :queued 2 :leased 0} (get-queue s)))
+        (let [ja (:body (cl/lease ca [:t2]))]
+          (is (= {:tier :t2 :queued 1 :leased 1} (get-queue s)))
+          (testing "an expired lease is demand again, not a live lease"
+            (swap! now + 61000)
+            (is (= {:tier :t2 :queued 2 :leased 0} (get-queue s))))
+          (testing "expiry needs the admin token"
+            (is (= 401 (:status (expire s "wrong" 0)))))
+          (testing "a run younger than the TTL stays pending"
+            (is (= [] (get-in (expire s admin 3600000) [:body :expired]))))
+          (testing "an old pending run is closed with an error status and leaves no demand"
+            (swap! now + 3600000)
+            (is (= [run-id] (get-in (expire s admin 3600000) [:body :expired])))
+            (is (= :hard-error (:status (get-run s run-id))))
+            (is (= {:tier :t2 :queued 0 :leased 0} (get-queue s)))
+            (is (= :no-job (get-in (cl/lease ca [:t2]) [:body :error])))
+            (is (some #(and (= "error" (:state %)) (= run-id (:run-id %)))
+                      (map :action (svc/pending-actions @(:state s))))))
+          (testing "the old lease holder can no longer complete"
+            (is (not= 200 (:status (do-job ca ja "x")))))))
+      (finally (srv/stop! s)))))

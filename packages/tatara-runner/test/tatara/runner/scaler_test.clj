@@ -24,3 +24,13 @@
   (testing "respects a non-zero minimum"
     (is (= {:replicas 1 :idle-since 0} (s/decide (assoc opts :min-replicas 1) {:current 0 :demand 0 :idle-since nil :now 0})))
     (is (= {:replicas 1 :idle-since 0} (s/decide (assoc opts :min-replicas 1) {:current 3 :demand 0 :idle-since 0 :now 600000})))))
+
+(deftest an-unreachable-coordinator-counts-as-no-demand
+  (is (= {:demand 4} (s/observed-demand (constantly 4))))
+  (let [r (s/observed-demand #(throw (ex-info "coordinator unreachable" {:err "timeout"})))]
+    (is (= 0 (:demand r)))
+    (is (= "coordinator unreachable" (:error r))))
+  (testing "so an outage longer than idle-ms scales to the minimum"
+    (is (= {:replicas 0 :idle-since 0}
+           (s/decide opts {:current 3 :demand (:demand (s/observed-demand #(throw (Exception. "x"))))
+                           :idle-since 0 :now 600000})))))

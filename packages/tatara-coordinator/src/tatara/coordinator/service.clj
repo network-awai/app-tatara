@@ -138,6 +138,53 @@
                   act (enqueue act))
          :reply {:ok true :run-status (:status r3) :quorum q}}))))
 
+(defn expire-stale
+  "Close every :pending run created at or before (- now ttl-ms) as :hard-error
+  :expired and queue an error status for it. Its open replica jobs become
+  :expired, so they are no longer leased or counted as demand. A run that no
+  runner can finish (leases lost while the coordinator was unreachable) would
+  otherwise stay :pending forever and keep runner nodes up (AWAI-3799).
+  Returns {:state s :reply {:expired [run-id ...]}}."
+  [state now ttl-ms]
+  (let [stale (->> (:runs state)
+                   (filter (fn [[_ r]] (and (= :pending (:status r)) (integer? (:created r))
+                                            (<= (:created r) (- now ttl-ms)))))
+                   (map key) sort vec)
+        ids (set stale)]
+    {:state (if (empty? stale)
+              state
+              (reduce (fn [s id]
+                        (let [r (assoc (get-in s [:runs id]) :status :hard-error
+                                       :outcome {:status :hard-error :reason :expired} :expired-at now)]
+                          (-> s (assoc-in [:runs id] r)
+                              (enqueue (status-action id r "error"
+                                                      "Tatara: expired without quorum; push again to rerun")))))
+                      (update state :jobs
+                              (fn [jobs] (into {} (map (fn [[jid j]]
+                                                         [jid (if (and (ids (:run-id j)) (not= :done (:status j)))
+                                                                (assoc j :status :expired) j)]))
+                                               jobs)))
+                      stale))
+     :reply {:expired stale}}))
+
+(defn queue-depth
+  "Demand for runners of tier with no required toolchain: replica jobs of
+  :pending runs that are :queued or whose lease expired (:queued), and those
+  with a live lease (:leased). Small, so a scaler can poll it cheaply."
+  [state now tier]
+  (let [runs (:runs state)
+        open (for [j (vals (:jobs state))
+                   :let [r (get runs (:run-id j))]
+                   :when (and (= :pending (:status r))
+                              (= tier (get-in r [:pipeline :tier] :t2))
+                              (nil? (get-in r [:pipeline :toolchain])))]
+               (cond (= :queued (:status j)) :queued
+                     (and (= :leased (:status j)) (> (:expires j 0) now)) :leased
+                     (= :leased (:status j)) :queued
+                     :else nil))
+        f (frequencies (remove nil? open))]
+    {:tier tier :queued (get f :queued 0) :leased (get f :leased 0)}))
+
 (defn pending-actions [state] (outbox/pending (:outbox state)))
 
 (defn mark-delivered [state k]

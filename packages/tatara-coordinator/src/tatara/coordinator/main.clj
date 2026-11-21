@@ -23,7 +23,7 @@
     (binding [*out* *err*] (println "usage: bb serve CONFIG.edn")) (System/exit 64))
   (let [cfg (edn/read-string (slurp config-path))
         admin (some-> (:admin-token-env cfg) System/getenv)
-        srv (http/start! (dissoc cfg :admin-token-env :github) {:admin-token admin})
+        srv (http/start! (dissoc cfg :admin-token-env :github :run-ttl-ms) {:admin-token admin})
         gh (when-let [g (:github cfg)]
              (let [g (merge {:api "https://api.github.com"} g)]
                (if-let [l (:lease g)]
@@ -39,6 +39,16 @@
              (assoc-in gh [:merge :token-fn] (lease/token-provider (assoc ml :identity (lease/read-identity (:identity ml)))))
              gh)]
     (when gh (github/start-loops! srv gh) (println "github: polling" (count (:repos gh)) "repos"))
+    ;; Close runs that stayed :pending past :run-ttl-ms (default 6 h), so lost
+    ;; leases neither block a commit's status nor keep runner nodes up (AWAI-3799).
+    (let [ttl (long (:run-ttl-ms cfg (* 6 3600 1000)))]
+      (doto (Thread. ^Runnable (fn [] (loop []
+                                        (try (let [{:keys [expired]} (http/expire-stale! srv ttl)]
+                                               (when (seq expired) (println "expired" (count expired) "stale runs" (pr-str expired))))
+                                             (catch Exception e (println "expiry failed" (ex-message e))))
+                                        (Thread/sleep 60000) (recur)))
+                     "tatara-expiry")
+        (.setDaemon true) (.start)))
     (println "tatara-coordinator listening on" (or (:bind cfg) "127.0.0.1") (:port srv)
              "runners:" (count (:allow cfg)))
     @(promise)))
