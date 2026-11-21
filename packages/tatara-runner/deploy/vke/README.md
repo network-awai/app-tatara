@@ -29,7 +29,7 @@ next to the Mac mini runners and take part in the same quorum.
 **Privileges.**
 - Pods run with `hostUsers: false`. Root in the pod maps to an unprivileged uid range on the node.
 - Seccomp is `RuntimeDefault`. There is no service account token and no DNS.
-- Capabilities are dropped except CHOWN, DAC_OVERRIDE, FOWNER (for apt at boot), SETUID and SETGID, all scoped to the pod's user namespace. No SYS_ADMIN, no NET_ADMIN.
+- Capabilities are dropped except CHOWN, DAC_OVERRIDE, FOWNER (for apt at boot), SETUID, SETGID and SYS_ADMIN, all scoped to the pod's user namespace. SYS_ADMIN is kept only because the RuntimeDefault seccomp profile allows `unshare` only to containers that hold it. There is no NET_ADMIN.
 - Steps run as uid 20000 with no capabilities and `no_new_privs`, through `setpriv`. They cannot read the identity (0600, root).
 - `:network :none` steps drop to uid 20000, then unshare their own user and network namespace (only loopback) and clear their bounding set.
 - The root filesystem is not read-only: the boot installs packages, because there is no image registry (D2).
