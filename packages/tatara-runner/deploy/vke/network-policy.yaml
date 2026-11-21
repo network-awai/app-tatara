@@ -1,0 +1,79 @@
+# NetworkPolicies for namespace tatara (AWAI-3799). Calico enforces them.
+# - Default: no ingress, no egress for any pod in the namespace.
+# - Runner pods: egress only to the coordinator (8790) and the egress proxy (3128). No DNS, no tailnet
+#   (100.64.0.0/10), no RFC1918, no node or metadata (169.254.169.254) address, no API server.
+#   :none steps run in their own empty network namespace on top of this.
+# - Egress proxy: ingress from runner pods and the scaler; egress to DNS and the public internet only.
+# - Coordinator: ingress 8790 from runner pods and the scaler (tailnet clients arrive through its
+#   tailscale interface inside the pod); egress to DNS and the public internet (GitHub API).
+# - Scaler: egress to the coordinator, the API server and the proxy (boot download).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny, namespace: tatara}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: runner-egress, namespace: tatara}
+spec:
+  podSelector: {matchLabels: {app: tatara-runner}}
+  policyTypes: [Egress]
+  egress:
+    - to: [{podSelector: {matchLabels: {app: tatara-coordinator}}}]
+      ports: [{port: 8790, protocol: TCP}]
+    - to: [{podSelector: {matchLabels: {app: tatara-egress}}}]
+      ports: [{port: 3128, protocol: TCP}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: egress-proxy, namespace: tatara}
+spec:
+  podSelector: {matchLabels: {app: tatara-egress}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app: tatara-runner}}
+        - podSelector: {matchLabels: {app: tatara-scaler}}
+        - podSelector: {matchLabels: {app: tatara-coordinator}}
+      ports: [{port: 3128, protocol: TCP}]
+  egress:
+    - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}, podSelector: {matchLabels: {k8s-app: kube-dns}}}]
+      ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+    - to:
+        - ipBlock: {cidr: 0.0.0.0/0, except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 127.0.0.0/8]}
+      ports: [{port: 80, protocol: TCP}, {port: 443, protocol: TCP}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: coordinator, namespace: tatara}
+spec:
+  podSelector: {matchLabels: {app: tatara-coordinator}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app: tatara-runner}}
+        - podSelector: {matchLabels: {app: tatara-scaler}}
+      ports: [{port: 8790, protocol: TCP}]
+  egress:
+    - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}, podSelector: {matchLabels: {k8s-app: kube-dns}}}]
+      ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+    # GitHub API, package downloads at boot, and the tailscale control plane / DERP relays.
+    - to:
+        - ipBlock: {cidr: 0.0.0.0/0, except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 127.0.0.0/8]}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: scaler, namespace: tatara}
+spec:
+  podSelector: {matchLabels: {app: tatara-scaler}}
+  policyTypes: [Egress]
+  egress:
+    - to: [{podSelector: {matchLabels: {app: tatara-coordinator}}}]
+      ports: [{port: 8790, protocol: TCP}]
+    - to: [{podSelector: {matchLabels: {app: tatara-egress}}}]
+      ports: [{port: 3128, protocol: TCP}]
+    # API server (endpoint of Service kubernetes; VKE control plane on the VPC).
+    - to: [{ipBlock: {cidr: 10.25.112.3/32}}]
+      ports: [{port: 6443, protocol: TCP}]

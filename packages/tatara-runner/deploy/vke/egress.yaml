@@ -1,0 +1,90 @@
+# Egress proxy for Tatara runner pods (AWAI-3799). Runner pods have no other way out: boot downloads
+# and :fetch steps go through this proxy, which forwards only to the hosts in tatara-egress-allowlist.
+# Its own NetworkPolicy (network-policy.yaml) allows the public internet only, so an allowed name that
+# resolves to a private, tailnet (100.64.0.0/10) or metadata address is still unreachable.
+# The allowlist is the initial D3 set (plan §1.3): package sources the pipelines and the boot script
+# use today. Changing it is a reviewed change to this file, not something a pipeline can do.
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: tatara-egress, namespace: tatara}
+data:
+  allowlist: |
+    ^archive\.ubuntu\.com$
+    ^security\.ubuntu\.com$
+    ^nodejs\.org$
+    ^github\.com$
+    ^codeload\.github\.com$
+    ^objects\.githubusercontent\.com$
+    ^release-assets\.githubusercontent\.com$
+    ^registry\.npmjs\.org$
+    ^index\.crates\.io$
+    ^static\.crates\.io$
+    ^static\.rust-lang\.org$
+    ^dl\.google\.com$
+    ^maven\.google\.com$
+    ^repo\.maven\.apache\.org$
+    ^repo1\.maven\.org$
+    ^repo\.clojars\.org$
+  tinyproxy.conf: |
+    User tinyproxy
+    Group tinyproxy
+    Port 3128
+    Listen 0.0.0.0
+    Timeout 600
+    MaxClients 64
+    LogLevel Connect
+    Syslog Off
+    DisableViaHeader Yes
+    # Pod network of the cluster only.
+    Allow 10.244.0.0/16
+    FilterDefaultDeny Yes
+    FilterType ere
+    FilterURLs Off
+    FilterCaseSensitive Off
+    Filter "/etc/tinyproxy/allowlist"
+    # CONNECT (HTTPS) only to 443; plain HTTP (apt) is forwarded by URL.
+    ConnectPort 443
+  boot.sh: |
+    #!/bin/sh
+    set -eu
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -q >/dev/null && apt-get install -y -q tinyproxy >/dev/null
+    install -m 644 /cfg/tinyproxy.conf /etc/tinyproxy/tinyproxy.conf
+    install -m 644 /cfg/allowlist /etc/tinyproxy/allowlist
+    echo "tinyproxy $(tinyproxy -v 2>&1 | head -1); $(grep -c . /etc/tinyproxy/allowlist) allowed hosts"
+    exec tinyproxy -d -c /etc/tinyproxy/tinyproxy.conf
+---
+apiVersion: v1
+kind: Service
+metadata: {name: tatara-egress, namespace: tatara}
+spec:
+  clusterIP: 10.96.79.128
+  selector: {app: tatara-egress}
+  ports: [{name: proxy, port: 3128, targetPort: 3128}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: tatara-egress, namespace: tatara}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: tatara-egress}}
+  template:
+    metadata: {labels: {app: tatara-egress}}
+    spec:
+      hostUsers: false
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      nodeSelector: {tatara.network/role: system}
+      securityContext: {seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: proxy
+          image: ubuntu:24.04
+          command: ["/bin/sh", "/cfg/boot.sh"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL], add: [SETUID, SETGID, CHOWN, DAC_OVERRIDE, FOWNER]}
+          ports: [{containerPort: 3128}]
+          readinessProbe: {tcpSocket: {port: 3128}, periodSeconds: 10}
+          volumeMounts: [{name: cfg, mountPath: /cfg}]
+          resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {memory: 256Mi}}
+      volumes: [{name: cfg, configMap: {name: tatara-egress}}]

@@ -1,0 +1,99 @@
+# Tatara coordinator on VKE (AWAI-3799): moved off the laptop (21mbp) to the always-on system pool.
+# - Node pool tatara-system (vc2-2c-4gb, 1 node; it also hosts the cluster's system pods). Runner pods
+#   are on the tainted tatara-ci-runners pool and cannot be scheduled here.
+# - State (state.edn, objects, blobs) on a 20 Gi Retain volume; source snapshots are collected 12 h after
+#   their run closes.
+# - Runner pods reach it at the fixed ClusterIP 10.96.79.90:8790. Mac mini runners and kagitaba-minter
+#   reach it over the tailnet through the tailscale sidecar (kernel mode: this pod runs no PR code; it
+#   needs NET_ADMIN and /dev/net/tun, the runner pods do not). Tailnet clients keep distinct source
+#   addresses, which :distinct-origins? needs.
+# - Not in Git: ConfigMap tatara-coordinator-config (coordinator.edn: allow set, repos, lease) and Secret
+#   tatara-coordinator-secrets (admin-token, lease-identity.edn, lease-identity-apex-merge.edn). See
+#   README.md for how they are created.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: tatara-coordinator-state, namespace: tatara}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: vultr-block-storage-retain
+  resources: {requests: {storage: 20Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: tatara-coordinator, namespace: tatara}
+spec:
+  clusterIP: 10.96.79.90
+  selector: {app: tatara-coordinator}
+  ports: [{name: http, port: 8790, targetPort: 8790}]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: tatara-coordinator-boot, namespace: tatara}
+data:
+  boot.sh: |
+    #!/bin/sh
+    set -eu
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -q >/dev/null && apt-get install -y -q git curl ca-certificates >/dev/null
+    T=$(mktemp -d); cd "$T"
+    curl -fsSLo bb.tgz https://github.com/babashka/babashka/releases/download/v1.12.218/babashka-1.12.218-linux-amd64-static.tar.gz
+    echo "7bd028cc794732ffde3da31ce4379840893c8e54f1046f92a8dfc4f4b3cddaf8  bb.tgz" | sha256sum -c - >/dev/null || { echo "digest mismatch: bb" >&2; exit 3; }
+    tar -xzf bb.tgz -C /usr/local/bin bb
+    git clone -q https://github.com/network-awai/app-tatara.git /opt/tatara && git -C /opt/tatara checkout -q --detach "$TATARA_REV"
+    install -d -m 700 /var/lib/tatara/state
+    TATARA_ADMIN_TOKEN=$(cat /secrets/admin-token); export TATARA_ADMIN_TOKEN
+    echo "coordinator tatara $(git -C /opt/tatara rev-parse --short HEAD); $(bb --version)"
+    cd /opt/tatara/packages/tatara-coordinator && exec bb serve /config/coordinator.edn
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: tatara-coordinator, namespace: tatara}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: tatara-coordinator}}
+  template:
+    metadata: {labels: {app: tatara-coordinator}}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      nodeSelector: {tatara.network/role: system}
+      securityContext: {seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: tailscale
+          image: tailscale/tailscale:v1.104.7
+          env:
+            - {name: TS_HOSTNAME, value: "tatara-coordinator"}
+            - {name: TS_AUTHKEY, valueFrom: {secretKeyRef: {name: tailscale-auth, key: TS_AUTHKEY}}}
+            - {name: TS_KUBE_SECRET, value: ""}
+            - {name: TS_USERSPACE, value: "false"}
+            # Persistent node state keeps the same tailnet address across restarts.
+            - {name: TS_STATE_DIR, value: /var/lib/tatara/tailscale}
+            - {name: TS_EXTRA_ARGS, value: "--accept-dns=false"}
+          securityContext: {capabilities: {drop: [ALL], add: [NET_ADMIN, NET_RAW, CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]}}
+          volumeMounts:
+            - {name: dev-tun, mountPath: /dev/net/tun}
+            - {name: state, mountPath: /var/lib/tatara/tailscale, subPath: tailscale}
+          resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {memory: 256Mi}}
+        - name: coordinator
+          image: ubuntu:24.04
+          command: ["/bin/sh", "/boot/boot.sh"]
+          env:
+            - {name: TATARA_REV, value: "TATARA_REV_PLACEHOLDER"}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL], add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]}
+          ports: [{containerPort: 8790}]
+          readinessProbe: {httpGet: {path: /v1/queue, port: 8790}, periodSeconds: 15, timeoutSeconds: 5}
+          volumeMounts:
+            - {name: boot, mountPath: /boot}
+            - {name: config, mountPath: /config, readOnly: true}
+            - {name: secrets, mountPath: /secrets, readOnly: true}
+            - {name: state, mountPath: /var/lib/tatara/state, subPath: state}
+          resources: {requests: {cpu: 250m, memory: 768Mi}, limits: {memory: 2Gi}}
+      volumes:
+        - {name: boot, configMap: {name: tatara-coordinator-boot}}
+        - {name: config, configMap: {name: tatara-coordinator-config}}
+        - {name: secrets, secret: {secretName: tatara-coordinator-secrets, defaultMode: 0400}}
+        - {name: state, persistentVolumeClaim: {claimName: tatara-coordinator-state}}
+        - {name: dev-tun, hostPath: {path: /dev/net/tun, type: CharDevice}}
