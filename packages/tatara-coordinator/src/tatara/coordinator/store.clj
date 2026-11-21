@@ -42,6 +42,10 @@
 (defn has-blob? [root sha] (.exists (blob-path root sha)))
 (defn put-blob! [root sha ^bytes data]
   (when-not (has-blob? root sha) (write-atomic! (blob-path root sha) data)))
+(defn delete-blob!
+  "Remove a blob; true when it existed."
+  [root sha]
+  (let [f (blob-path root sha)] (.delete f)))
 (defn read-blob [root sha]
   (let [f (blob-path root sha)] (when (.exists f) (Files/readAllBytes (.toPath f)))))
 

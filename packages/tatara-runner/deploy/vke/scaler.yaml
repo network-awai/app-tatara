@@ -1,8 +1,9 @@
-# Queue-based scaler for the tatara-runner StatefulSet (AWAI-3542).
-# Reads the coordinator's GET /v1/runs over the tailnet and sets the StatefulSet's replica count through
-# the scale subresource (tatara.runner.scaler): up at once to the open replica jobs (max 3), down to the
-# minimum only after IDLE_SECONDS with no open job. Its service account can only get and patch
-# statefulsets/scale of tatara-runner.
+# Queue-based scaler for the runner StatefulSets (AWAI-3542, AWAI-3799).
+# Reads the coordinator's GET /v1/queue (in-cluster Service, no tailscale) and sets each per-identity
+# StatefulSet tatara-runner-N to 0 or 1 through the scale subresource (tatara.runner.scaler): up at once
+# to the open replica jobs (max 3), down to 0 only after IDLE_SECONDS with no demand. An unreachable
+# coordinator counts as no demand. Its service account can only get and patch statefulsets/scale of
+# tatara-runner-0..2.
 apiVersion: v1
 kind: ServiceAccount
 metadata: {name: tatara-scaler, namespace: tatara}
@@ -13,7 +14,7 @@ metadata: {name: tatara-scaler, namespace: tatara}
 rules:
   - apiGroups: [apps]
     resources: [statefulsets/scale]
-    resourceNames: [tatara-runner]
+    resourceNames: [tatara-runner-0, tatara-runner-1, tatara-runner-2]
     verbs: [get, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -30,17 +31,20 @@ data:
     #!/bin/sh
     set -eu
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -q >/dev/null && apt-get install -y -q git curl ca-certificates >/dev/null
+    export http_proxy="$PROXY" https_proxy="$PROXY"
+    apt-get -o Acquire::http::Proxy="$PROXY" update -q >/dev/null && apt-get -o Acquire::http::Proxy="$PROXY" install -y -q git curl ca-certificates >/dev/null
     T=$(mktemp -d); cd "$T"
     curl -fsSLo bb.tgz https://github.com/babashka/babashka/releases/download/v1.12.218/babashka-1.12.218-linux-amd64-static.tar.gz
     echo "7bd028cc794732ffde3da31ce4379840893c8e54f1046f92a8dfc4f4b3cddaf8  bb.tgz" | sha256sum -c - >/dev/null || { echo "digest mismatch: bb" >&2; exit 3; }
     tar -xzf bb.tgz -C /usr/local/bin bb
     git clone -q https://github.com/network-awai/app-tatara.git /opt/tatara && git -C /opt/tatara checkout -q --detach "$TATARA_REV"
+    unset http_proxy https_proxy
     cat > /tmp/scaler.edn <<EOF
-    {:coordinator "$COORDINATOR" :namespace "tatara" :statefulset "tatara-runner"
+    {:coordinator "$COORDINATOR" :namespace "tatara"
+     :statefulsets ["tatara-runner-0" "tatara-runner-1" "tatara-runner-2"]
      :min-replicas $MIN_REPLICAS :max-replicas $MAX_REPLICAS :idle-seconds $IDLE_SECONDS :poll-seconds 30}
     EOF
-    until curl -s -m 5 -o /dev/null "$COORDINATOR/"; do echo "waiting for tailnet route to coordinator"; sleep 5; done
+    until curl -s -m 5 -o /dev/null "$COORDINATOR/"; do echo "waiting for coordinator"; sleep 5; done
     cd /opt/tatara/packages/tatara-runner && exec bb scale /tmp/scaler.edn
 ---
 apiVersion: apps/v1
@@ -54,33 +58,30 @@ spec:
     metadata: {labels: {app: tatara-scaler}}
     spec:
       serviceAccountName: tatara-scaler
+      hostUsers: false
+      enableServiceLinks: false
+      dnsPolicy: None
+      dnsConfig: {nameservers: ["127.0.0.1"]}
+      nodeSelector: {tatara.network/role: system}
+      securityContext: {seccompProfile: {type: RuntimeDefault}}
       containers:
-        - name: tailscale
-          image: tailscale/tailscale:v1.104.7
-          env:
-            - {name: TS_HOSTNAME, value: "vke-tatara-scaler"}
-            - {name: TS_AUTHKEY, valueFrom: {secretKeyRef: {name: tailscale-auth, key: TS_AUTHKEY}}}
-            - {name: TS_KUBE_SECRET, value: ""}
-            - {name: TS_USERSPACE, value: "false"}
-            - {name: TS_STATE_DIR, value: /var/lib/tailscale}
-            - {name: TS_EXTRA_ARGS, value: "--accept-dns=false"}
-          securityContext: {capabilities: {add: [NET_ADMIN, NET_RAW]}}
-          volumeMounts:
-            - {name: dev-tun, mountPath: /dev/net/tun}
-            - {name: ts-state, mountPath: /var/lib/tailscale}
-          resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {memory: 256Mi}}
         - name: scaler
           image: ubuntu:24.04
           command: ["/bin/sh", "/boot/boot.sh"]
           env:
-            - {name: TATARA_REV, value: "6c3b3aac61023e87fbe93797c4304621169651a5"}
-            - {name: COORDINATOR, value: "http://100.108.223.94:8790"}
+            - {name: TATARA_REV, value: "TATARA_REV_PLACEHOLDER"}
+            - {name: COORDINATOR, value: "http://10.96.79.90:8790"}
+            - {name: PROXY, value: "http://10.96.79.128:3128"}
+            # The API server by IP: the pod has no DNS.
+            - {name: KUBERNETES_SERVICE_HOST, value: "10.96.0.1"}
+            - {name: KUBERNETES_SERVICE_PORT, value: "443"}
             - {name: MIN_REPLICAS, value: "0"}
             - {name: MAX_REPLICAS, value: "3"}
             - {name: IDLE_SECONDS, value: "600"}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL], add: [SETUID, SETGID, CHOWN, DAC_OVERRIDE, FOWNER]}
           volumeMounts: [{name: boot, mountPath: /boot}]
           resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 512Mi}}
       volumes:
         - {name: boot, configMap: {name: tatara-scaler-boot}}
-        - {name: dev-tun, hostPath: {path: /dev/net/tun, type: CharDevice}}
-        - {name: ts-state, emptyDir: {}}

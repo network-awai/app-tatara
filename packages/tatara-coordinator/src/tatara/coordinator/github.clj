@@ -3,7 +3,7 @@
 
   poll-once: for each configured repo, read the open PR heads and the default
   branch head; for every commit that carries `.tatara/pipeline.edn`, submit a
-  run. Commits are remembered per process after admission or a missing pipeline.
+  run of the default branch head's pipeline (the trusted one, AWAI-3799). Commits are remembered per process after admission or a missing pipeline.
   deliver-once: send each pending outbox action as a commit status and mark it
   delivered only after GitHub answers 2xx; failures stay pending for the next
   round. The token stays in the coordinator process; runners never see it."
@@ -90,11 +90,17 @@
   (merge {:phase phase :type (str (class e))}
          (select-keys (ex-data e) [:status :bytes])))
 
-(defn- poll-head [server gh seen repo {:keys [ref sha]}]
+(defn- poll-head
+  "trusted: a delay of the pipeline at the default branch head (or :absent).
+  A head opts in by carrying .tatara/pipeline.edn, but what runs is always the
+  trusted pipeline, never the head's own file: a PR cannot change its
+  steps, :network, :tier or toolchain by editing .tatara/pipeline.edn
+  (AWAI-3799). A PR's own pipeline file takes effect once it is merged."
+  [server gh seen repo trusted {:keys [ref sha]}]
   (let [key [repo sha]
         result {:repo repo :sha sha}]
     (try
-      (let [pipeline (pipeline-at gh repo sha)
+      (let [pipeline (if (= :absent (pipeline-at gh repo sha)) :absent @trusted)
             reply (if (= :absent pipeline)
                     :no-pipeline
                     (srv/submit! server
@@ -115,9 +121,13 @@
 
 (defn- poll-repo [server gh seen repo]
   (try
-    (vec (for [{:keys [sha] :as head} (heads gh repo)
-               :when (and sha (not (contains? @seen [repo sha])))]
-           (poll-head server gh seen repo head)))
+    (let [hs (heads gh repo)
+          main-sha (some #(when (re-find #"^refs/heads/" (:ref %)) (:sha %)) hs)
+          ;; No readable default branch head: nothing is trusted, nothing runs.
+          trusted (delay (if main-sha (pipeline-at gh repo main-sha) :absent))]
+      (vec (for [{:keys [sha] :as head} hs
+                 :when (and sha (not (contains? @seen [repo sha])))]
+             (poll-head server gh seen repo trusted head))))
     (catch Exception e
       [{:repo repo :error (failure :heads e)}])))
 

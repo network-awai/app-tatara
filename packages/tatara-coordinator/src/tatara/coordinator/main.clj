@@ -23,7 +23,7 @@
     (binding [*out* *err*] (println "usage: bb serve CONFIG.edn")) (System/exit 64))
   (let [cfg (edn/read-string (slurp config-path))
         admin (some-> (:admin-token-env cfg) System/getenv)
-        srv (http/start! (dissoc cfg :admin-token-env :github :run-ttl-ms) {:admin-token admin})
+        srv (http/start! (dissoc cfg :admin-token-env :github :run-ttl-ms :snapshot-retention-ms) {:admin-token admin})
         gh (when-let [g (:github cfg)]
              (let [g (merge {:api "https://api.github.com"} g)]
                (if-let [l (:lease g)]
@@ -41,11 +41,17 @@
     (when gh (github/start-loops! srv gh) (println "github: polling" (count (:repos gh)) "repos"))
     ;; Close runs that stayed :pending past :run-ttl-ms (default 6 h), so lost
     ;; leases neither block a commit's status nor keep runner nodes up (AWAI-3799).
-    (let [ttl (long (:run-ttl-ms cfg (* 6 3600 1000)))]
+    ;; Source snapshots of closed runs are deleted after :snapshot-retention-ms
+    ;; (default 12 h); they can be fetched from GitHub again.
+    (let [ttl (long (:run-ttl-ms cfg (* 6 3600 1000)))
+          keep-ms (long (:snapshot-retention-ms cfg (* 12 3600 1000)))]
       (doto (Thread. ^Runnable (fn [] (loop []
                                         (try (let [{:keys [expired]} (http/expire-stale! srv ttl)]
                                                (when (seq expired) (println "expired" (count expired) "stale runs" (pr-str expired))))
                                              (catch Exception e (println "expiry failed" (ex-message e))))
+                                        (try (let [n (http/gc-snapshots! srv keep-ms)]
+                                               (when (pos? n) (println "snapshot gc removed" n "blobs")))
+                                             (catch Exception e (println "snapshot gc failed" (ex-message e))))
                                         (Thread/sleep 60000) (recur)))
                      "tatara-expiry")
         (.setDaemon true) (.start)))

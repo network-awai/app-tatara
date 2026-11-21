@@ -5,6 +5,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [org.httpkit.server :as hs]
+            [tatara.core.canonical :as c]
             [tatara.coordinator.client :as cl]
             [tatara.coordinator.crypto :as crypto]
             [tatara.coordinator.e2e-test :as e2e]
@@ -152,10 +153,10 @@
     (with-redefs [gh/heads (fn [_ r]
                             (if (= stalled-repo r)
                               (do (deliver entered true) @release [])
-                              [{:ref "refs/pull/7/head" :sha "pr-sha"}]))
+                              [{:ref "refs/heads/main" :sha "main-sha"} {:ref "refs/pull/7/head" :sha "pr-sha"}]))
                   gh/pipeline-at (constantly e2e/pipeline)
                   gh/snapshot! (constantly nil)
-                  srv/submit! (fn [_ data] (deliver admitted (:event data)) {:run-id "test"})
+                  srv/submit! (fn [_ data] (when (= "pr-sha" (get-in data [:event :sha])) (deliver admitted (:event data))) {:run-id "test"})
                   gh/deliver-once (fn [_ _] (deliver delivered true) [])]
       (let [threads (gh/start-loops! {} {:repos [stalled-repo repo]})]
         (try
@@ -266,3 +267,26 @@
         (is (= 3 (count t2)))
         (is (some #(= "tatara-github-merge" (.getName ^Thread %)) t2))
         (finally (doseq [t (concat t1 t2)] (.interrupt ^Thread t)))))))
+
+(deftest a-pull-request-runs-the-default-branch-pipeline
+  (testing "a PR that edits .tatara/pipeline.edn (steps, :fetch) still runs main's pipeline (AWAI-3799)"
+    (let [evil (assoc e2e/pipeline :network :fetch :steps [["curl" "http://100.100.100.100"]])
+          submitted (atom [])]
+      (with-redefs [gh/heads (fn [_ _] [{:ref "refs/heads/main" :sha "main-sha"}
+                                        {:ref "refs/pull/9/head" :sha "evil-sha"}])
+                    gh/pipeline-at (fn [_ _ sha] (if (= "evil-sha" sha) evil e2e/pipeline))
+                    gh/snapshot! (constantly nil)
+                    srv/submit! (fn [_ body] (swap! submitted conj body) {:run-id (get-in body [:event :sha])})]
+        (gh/poll-once {} {:repos [repo]} (atom #{}))
+        ;; A set: worker threads left by start-loops! tests may see these redefs too.
+        (is (= #{"main-sha" "evil-sha"} (set (map #(get-in % [:event :sha]) @submitted))))
+        (is (every? #(= e2e/pipeline (:pipeline %)) @submitted))
+        (is (every? #(= (c/cid crypto/ctx e2e/pipeline) (get-in % [:event :pipeline-cid])) @submitted)))))
+  (testing "without a readable default branch head nothing runs"
+    (let [submitted (atom [])]
+      (with-redefs [gh/heads (fn [_ _] [{:ref "refs/pull/9/head" :sha "pr-only"}])
+                    gh/pipeline-at (constantly e2e/pipeline)
+                    gh/snapshot! (constantly nil)
+                    srv/submit! (fn [_ body] (swap! submitted conj body) {:run-id "x"})]
+        (is (= [:no-pipeline] (mapv :reply (gh/poll-once {} {:repos [repo]} (atom #{})))))
+        (is (empty? @submitted))))))

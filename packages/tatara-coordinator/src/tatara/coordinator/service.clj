@@ -55,10 +55,21 @@
                           (enqueue (status-action id r "pending" "Tatara: waiting for runners")))
                :reply {:run-id id :duplicate? false}})))))))
 
+(defn- origin-used?
+  "With :distinct-origins?, a run's replicas must come from different network
+  origins (pod or host address): two DIDs on one compromised pod or host must
+  not form a quorum alone (AWAI-3799)."
+  [{:keys [distinct-origins?]} state run-id runner origin]
+  (and distinct-origins? origin
+       (some #(and (= run-id (:run-id %)) (= origin (:origin %)) (not= runner (:runner %))
+                   (contains? #{:leased :done} (:status %)))
+             (vals (:jobs state)))))
+
 (defn lease-job
   "Give the runner the first claimable replica of the oldest pending run whose
-  tier and toolchain it supports. Toolchains are assigned by the operator."
-  [{:keys [allow ttl-ms runner-toolchains]} state {:keys [runner tiers]} token now]
+  tier and toolchain it supports. Toolchains are assigned by the operator.
+  origin: the request's source address, recorded on the job."
+  [{:keys [allow ttl-ms runner-toolchains] :as cfg} state {:keys [runner tiers]} token now & [origin]]
   (if-not (contains? allow runner)
     {:state state :reply {:error :runner-not-allowed}}
     (let [tiers (set tiers)
@@ -73,10 +84,12 @@
       (loop [[[id r] & more] candidates]
         (if-not id
           {:state state :reply {:error :no-job}}
-          (let [res (lease/claim ctx state {:run-id id :runner runner :token token :now now :ttl ttl-ms})]
+          (let [res (if (origin-used? cfg state id runner origin)
+                      {:error :origin-used}
+                      (lease/claim ctx state {:run-id id :runner runner :token token :now now :ttl ttl-ms}))]
             (if (:error res)
               (recur more)
-              {:state (assoc-in (:state res) [:jobs (:job-id res) :leased-at] now)
+              {:state (update-in (:state res) [:jobs (:job-id res)] assoc :leased-at now :origin origin)
                :reply {:job-id (:job-id res) :token token :ttl-ms ttl-ms :run-id id
                        :repo (:repo r) :sha (:sha r) :ref (:ref r)
                        :pipeline (:pipeline r) :pipeline-cid (:pipeline-cid r)
@@ -110,7 +123,7 @@
   "sub: {:job-id :runner :token :verdict :signed {:job-id :rid :ref :verdict-cid}
          :signature :receipt-cid :snapshot-cid}.
   Admission is tatara.core.verdict/admit-completion; then quorum decides."
-  [{:keys [allow]} state sub now cas-has?]
+  [{:keys [allow] :as cfg} state sub now cas-has? & [origin]]
   (let [job (get-in state [:jobs (:job-id sub)])
         r (get-in state [:runs (:run-id job)])
         adm (when r
@@ -119,6 +132,11 @@
     (cond
       (nil? r) {:state state :reply {:error :unknown-job}}
       (:error adm) {:state state :reply adm}
+      ;; The verdict must come from where the lease went, and no other DID of
+      ;; this run may have completed from the same origin.
+      (and (:distinct-origins? cfg) (not= origin (:origin job))) {:state state :reply {:error :origin-mismatch}}
+      (origin-used? cfg (update state :jobs dissoc (:job-id sub)) (:run-id job) (:runner sub) origin)
+      {:state state :reply {:error :origin-used}}
       (not= :pending (:status r)) {:state state :reply {:error :run-closed :status (:status r)}}
       :else
       (let [run-id (:run-id job)
@@ -137,6 +155,27 @@
                             (assoc-in [:runs run-id] r3))
                   act (enqueue act))
          :reply {:ok true :run-status (:status r3) :quorum q}}))))
+
+(defn rerun
+  "Reopen closed runs so they run again with fresh replica jobs (operator
+  action, e.g. after a runner-side fault; AWAI-3799). The run id is the hash of
+  its event, so the run is reset in place; the earlier outcome, entries and
+  submissions are kept under :previous. Pending or unknown runs are skipped.
+  Returns {:state s :reply {:rerun [ids] :skipped [ids]}}."
+  [state run-ids now]
+  (let [ok (filter #(when-let [r (get-in state [:runs %])] (not= :pending (:status r))) (distinct run-ids))]
+    {:state (reduce (fn [s id]
+                      (let [r (get-in s [:runs id])
+                            prev (select-keys r [:status :outcome :entries :submissions :quorum-at :expired-at :created])
+                            r2 (-> r (dissoc :outcome :quorum-at :expired-at :submissions)
+                                   (assoc :status :pending :entries [] :created now)
+                                   (update :previous (fnil conj []) prev))]
+                        (-> s
+                            (assoc-in [:runs id] r2)
+                            (update :jobs merge (lease/expand-replicas ctx id (:threshold r)))
+                            (enqueue (status-action id r2 "pending" "Tatara: rerun, waiting for runners")))))
+                    state ok)
+     :reply {:rerun (vec ok) :skipped (vec (remove (set ok) run-ids))}}))
 
 (defn expire-stale
   "Close every :pending run created at or before (- now ttl-ms) as :hard-error
@@ -167,6 +206,68 @@
                       stale))
      :reply {:expired stale}}))
 
+(defn collectable-snapshots
+  "Source-snapshot blob shas that no run needs any more: every run that names
+  the snapshot is closed, and closed at or before (- now retention-ms) (by
+  quorum, hard error or expiry; :created when no close time was kept). The
+  tarball can be fetched again from the forge; logs and artifacts are other
+  blobs and are kept. Without this the CAS grew ~180 MB per awai-os run."
+  [state now retention-ms]
+  (let [by-sha (group-by #(get-in % [:snapshot :sha256]) (vals (:runs state)))]
+    (->> by-sha
+         (keep (fn [[sha runs]]
+                 (when (and sha
+                            (every? (fn [r] (and (not= :pending (:status r))
+                                                 (<= (or (:quorum-at r) (:expired-at r) (:created r) 0)
+                                                     (- now retention-ms))))
+                                    runs))
+                   sha)))
+         sort vec)))
+
+(defn- run-result [r]
+  (case (:status r)
+    :reached (some #(when (= (get-in r [:outcome :verdict-cid]) (:verdict-cid %)) (:result %)) (:entries r))
+    :hard-error :failed
+    nil))
+
+(defn- median [xs]
+  (when (seq xs) (let [v (vec (sort xs)) n (count v)]
+                   (if (odd? n) (v (quot n 2)) (quot (+ (v (dec (quot n 2))) (v (quot n 2))) 2)))))
+
+(defn dora
+  "DORA-style baselines per repo over default-branch runs created in
+  [now - window-ms, now] (AWAI-3799). Tatara sees verified merges, not deploys:
+  - :changes, :changes-per-day: closed default-branch runs (a deploy-frequency
+    proxy; a deploy pipeline would report its own events);
+  - :change-failure-rate: failed or hard-error over closed runs (an expired run
+    counts as failed: no verdict reached);
+  - :restore-ms: for each failing run, time until the next passing run of the
+    same repo (median and count; :open when not yet restored).
+  A rerun keeps only its latest outcome."
+  [state now window-ms]
+  (let [main? #(re-find #"^refs/heads/" (str (:ref %)))
+        runs (->> (vals (:runs state))
+                  (filter #(and (main? %) (integer? (:created %)) (<= (- now window-ms) (:created %) now)
+                                (not= :pending (:status %))))
+                  (sort-by :created))
+        days (/ window-ms 86400000.0)]
+    (into (sorted-map)
+          (for [[repo rs] (group-by :repo runs)]
+            (let [res (map run-result rs)
+                  fails (count (filter #(not= :passed %) res))
+                  restores (loop [[r & more] rs out [] open 0]
+                             (cond (nil? r) {:ms out :open open}
+                                   (= :passed (run-result r)) (recur more out open)
+                                   :else (if-let [ok (first (filter #(= :passed (run-result %)) more))]
+                                           (recur (drop-while #(not= :passed (run-result %)) more)
+                                                  (conj out (- (:created ok) (:created r))) open)
+                                           {:ms out :open (inc open)})))]
+              [repo {:changes (count rs)
+                     :changes-per-day (/ (Math/round (* 100.0 (/ (count rs) days))) 100.0)
+                     :failed fails
+                     :change-failure-rate (when (seq rs) (/ (Math/round (* 1000.0 (/ fails (count rs)))) 1000.0))
+                     :restore {:count (count (:ms restores)) :median-ms (median (:ms restores)) :open (:open restores)}}])))))
+
 (defn queue-depth
   "Demand for runners of tier with no required toolchain: replica jobs of
   :pending runs that are :queued or whose lease expired (:queued), and those
@@ -196,7 +297,9 @@
     (assoc (select-keys r [:repo :sha :ref :pipeline-cid :threshold :status :entries :outcome :created])
            :run-id run-id
            :replicas (->> (:jobs state) vals (filter #(= run-id (:run-id %)))
-                          (map #(select-keys % [:index :status :runner])) (sort-by :index) vec))))
+                          (map #(cond-> (select-keys % [:index :status :runner])
+                                  (:receipt-cid %) (assoc :log (str "/v1/runs/" run-id "/log/" (:index %)))))
+                          (sort-by :index) vec))))
 
 (defn- elapsed-ms [start end]
   (when (and (integer? start) (integer? end) (<= start end))

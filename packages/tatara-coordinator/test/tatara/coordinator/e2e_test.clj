@@ -251,3 +251,91 @@
           (testing "the old lease holder can no longer complete"
             (is (not= 200 (:status (do-job ca ja "x")))))))
       (finally (srv/stop! s)))))
+
+(deftest one-origin-cannot-form-a-quorum-alone
+  (testing "with :distinct-origins?, two DIDs from the same address get one replica between them (AWAI-3799)"
+    (let [st (-> svc/empty-state
+                 (#(:state (svc/submit-run {} % {:event event :pipeline pipeline} 0))))
+          cfg {:allow #{(:did a) (:did b)} :ttl-ms 60000 :distinct-origins? true}
+          r1 (svc/lease-job cfg st {:runner (:did a) :tiers [:t2]} "t1" 1 "10.244.1.5")
+          r2 (svc/lease-job cfg (:state r1) {:runner (:did b) :tiers [:t2]} "t2" 2 "10.244.1.5")
+          r3 (svc/lease-job cfg (:state r1) {:runner (:did b) :tiers [:t2]} "t3" 2 "10.244.2.9")]
+      (is (:job-id (:reply r1)))
+      (is (= :no-job (get-in r2 [:reply :error])))
+      (is (:job-id (:reply r3)))
+      (is (= "10.244.2.9" (get-in (:state r3) [:jobs (get-in r3 [:reply :job-id]) :origin])))
+      (testing "without the option (tests, single host) origins are not compared"
+        (is (:job-id (:reply (svc/lease-job (dissoc cfg :distinct-origins?) (:state r1)
+                                            {:runner (:did b) :tiers [:t2]} "t2" 2 "10.244.1.5"))))))))
+
+(deftest a-verdict-must-come-from-the-lease-origin
+  (let [s (srv/start! {:root *root* :allow #{(:did a) (:did b)} :ttl-ms 60000 :distinct-origins? true}
+                      {:clock clock :admin-token admin})
+        ca (cl/client (base s) a clock)]
+    (try
+      (submit s {:event event :pipeline pipeline})
+      (let [ja (:body (cl/lease ca [:t2]))]
+        (testing "the lease records the source address"
+          (is (= "127.0.0.1" (get-in @(:state s) [:jobs (:job-id ja) :origin]))))
+        (testing "a second DID from the same address gets no replica of the run"
+          (is (= :no-job (get-in (cl/lease (cl/client (base s) b clock) [:t2]) [:body :error]))))
+        (testing "completion from the lease origin is accepted"
+          (is (= 200 (:status (do-job ca ja "x"))))))
+      (finally (srv/stop! s)))))
+
+(deftest closed-runs-snapshots-are-collected-after-retention
+  (let [st {:runs {"open"   {:status :pending :created 0 :snapshot {:sha256 "aa"}}
+                   "shared" {:status :reached :quorum-at 0 :snapshot {:sha256 "aa"}}
+                   "old"    {:status :reached :quorum-at 0 :snapshot {:sha256 "bb"}}
+                   "gone"   {:status :hard-error :expired-at 0 :snapshot {:sha256 "cc"}}
+                   "fresh"  {:status :reached :quorum-at 900 :snapshot {:sha256 "dd"}}
+                   "nosnap" {:status :reached :quorum-at 0}}}]
+    (testing "a snapshot still named by a pending run, or closed within retention, is kept"
+      (is (= ["bb" "cc"] (svc/collectable-snapshots st 1000 500)))))
+  (let [s (start)]
+    (try
+      (let [{:keys [sha256]} (srv/put-blob! s (.getBytes "tarball" "UTF-8"))]
+        (submit s {:event event :pipeline pipeline :snapshot {:sha256 sha256 :size 7}})
+        (srv/expire-stale! s 0)
+        (swap! now + 10)
+        (is (= 1 (srv/gc-snapshots! s 5)))
+        (is (not (tatara.coordinator.store/has-blob? *root* sha256)))
+        (is (= 0 (srv/gc-snapshots! s 5))))
+      (finally (srv/stop! s)))))
+
+(deftest a-closed-run-can-be-rerun-and-logs-are-linked
+  (let [s (start) ca (cl/client (base s) a clock) cb (cl/client (base s) b clock)]
+    (try
+      (let [id (get-in (submit s {:event event :pipeline pipeline}) [:body :run-id])
+            ja (:body (cl/lease ca [:t2])) jb (:body (cl/lease cb [:t2]))]
+        (do-job ca ja "x") (do-job cb jb "x")
+        (is (= :reached (:status (get-run s id))))
+        (is (= (str "/v1/runs/" id "/log/0") (:log (first (:replicas (get-run s id))))))
+        (let [r (http/post (str (base s) "/v1/admin/rerun")
+                           {:headers {"authorization" (str "Bearer " admin)} :body (pr-str {:run-ids [id "nope"]}) :throw false})]
+          (is (= {:rerun [id] :skipped ["nope"]} (edn/read-string (:body r)))))
+        (let [v (get-run s id)]
+          (is (= :pending (:status v)))
+          (is (= [:queued :queued] (mapv :status (:replicas v)))))
+        (testing "the same runners can take the rerun"
+          (is (:job-id (:body (cl/lease ca [:t2])))))
+        (is (= :reached (:status (first (:previous (get-in @(:state s) [:runs id])))))))
+      (finally (srv/stop! s)))))
+
+(deftest dora-baselines-from-default-branch-runs
+  (let [h 3600000
+        pass (fn [t] {:repo "r" :ref "refs/heads/main" :created t :status :reached
+                      :outcome {:verdict-cid "v"} :entries [{:verdict-cid "v" :result :passed}]})
+        fail (fn [t] {:repo "r" :ref "refs/heads/main" :created t :status :reached
+                      :outcome {:verdict-cid "v"} :entries [{:verdict-cid "v" :result :failed}]})
+        st {:runs {"1" (pass h) "2" (fail (* 2 h)) "3" (fail (* 3 h)) "4" (pass (* 5 h))
+                   "5" {:repo "r" :ref "refs/heads/main" :created (* 6 h) :status :hard-error}
+                   "pr" (fail (* 2 h)) "old" (pass (- h))
+                   "p" {:repo "r" :ref "refs/heads/main" :created (* 7 h) :status :pending}}}
+        st (assoc-in st [:runs "pr" :ref] "refs/pull/1/head")
+        d (get (svc/dora st (* 8 h) (* 8 h)) "r")]
+    (is (= 5 (:changes d)))
+    (is (= 3 (:failed d)))
+    (is (= 0.6 (:change-failure-rate d)))
+    (testing "restore runs from the first failing run to the next passing one; an unrestored failure is open"
+      (is (= {:count 1 :median-ms (* 3 h) :open 1} (:restore d))))))

@@ -1,12 +1,20 @@
-# Tatara T2 runners on VKE (AWAI-3542). No Nix, no image registry.
-# - StatefulSet tatara-runner: pod N uses identity Secret tatara-runner-identity-N (N = 0..2), so every
-#   replica has its own DID; all three DIDs are in the coordinator :allow set.
-# - Sidecar tailscale joins the tailnet (ephemeral, auth key Secret tailscale-auth) so the runner reaches
-#   the coordinator at 100.108.223.94:8790.
-# - Container runner installs pinned Node 22.23.5, Babashka 1.12.218, nbb 1.4.208 (digests checked) and
-#   app-tatara at a fixed commit, then runs `bb run runner.edn`. iproute2 is needed: :unshare steps
-#   bring up loopback with `ip link set lo up` (without it every :network :none step fails).
-# - The replica count is set by the queue-based scaler (scaler.yaml); it starts at 0.
+# Tatara T2 runners on VKE (AWAI-3542, hardened in AWAI-3799). No Nix, no image registry.
+# - One StatefulSet (replicas 0 or 1) per runner identity: tatara-runner-N mounts only Secret
+#   tatara-runner-identity-N. A compromised pod holds one DID, never a quorum.
+# - Pods run in their own user namespace (hostUsers: false): root in the pod is an unprivileged uid on
+#   the node. Capabilities are dropped except CHOWN/DAC_OVERRIDE/FOWNER (apt at boot, chown of the job
+#   directory), SETUID/SETGID (to drop to the step user) and SYS_ADMIN, all scoped to the pod's user
+#   namespace. SYS_ADMIN is there only because containerd's RuntimeDefault seccomp profile allows
+#   unshare(2) only for containers that hold it; the step itself drops to uid 20000, unshares its own
+#   user + network namespace and clears its bounding set, so it runs with no capabilities. No NET_ADMIN. Steps run as uid
+#   20000 with no capabilities and no_new_privs, and cannot read the identity (0600, root).
+# - No tailscale, no NET_ADMIN, no /dev/net/tun, no DNS, no service account token. The pod can reach
+#   only the coordinator (10.96.79.90:8790) and the egress proxy (10.96.79.128:3128); see
+#   network-policy.yaml. Downloads at boot and :fetch steps go through the proxy's allowlist.
+# - Only on the runner pool (label tatara.network/role=runner, taint tatara.network/runner=ci), one runner
+#   per node. The pool is vc2-1c-2gb, min 1 (VKE pools cannot scale up from 0), max 3; 800m CPU allocatable,
+#   350m taken by DaemonSets and often 250m by calico-typha, so a runner requests 150m (burst to 1 CPU).
+# - The scaler (scaler.yaml) sets each StatefulSet to 0 or 1.
 apiVersion: v1
 kind: ConfigMap
 metadata: {name: tatara-runner-boot, namespace: tatara}
@@ -14,9 +22,10 @@ data:
   boot.sh: |
     #!/bin/sh
     set -eu
-    ORD=${POD_NAME##*-}
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -q >/dev/null && apt-get install -y -q git curl xz-utils ca-certificates util-linux iproute2 openssl python3 >/dev/null
+    ORD=${POD_NAME%-0}; ORD=${ORD##*-}
+    export DEBIAN_FRONTEND=noninteractive http_proxy="$PROXY" https_proxy="$PROXY"
+    apt-get -o Acquire::http::Proxy="$PROXY" update -q >/dev/null
+    apt-get -o Acquire::http::Proxy="$PROXY" install -y -q git curl xz-utils ca-certificates util-linux iproute2 openssl python3 >/dev/null
     T=$(mktemp -d); cd "$T"
     check256() { echo "$2  $1" | sha256sum -c - >/dev/null || { echo "digest mismatch: $1" >&2; exit 3; }; }
     check512() { [ "$(openssl dgst -sha512 -binary "$1" | base64 -w0)" = "$2" ] || { echo "digest mismatch: $1" >&2; exit 3; }; }
@@ -35,67 +44,158 @@ data:
     printf '#!/bin/sh\nexec /opt/node/bin/node /opt/nbb/cli.js "$@"\n' > /usr/local/bin/nbb; chmod 755 /usr/local/bin/nbb
     ln -sfn /opt/node/bin/node /usr/local/bin/node; ln -sfn /opt/node/bin/npm /usr/local/bin/npm
     git clone -q https://github.com/network-awai/app-tatara.git /opt/tatara && git -C /opt/tatara checkout -q --detach "$TATARA_REV"
-    mkdir -p /var/lib/tatara/work; install -m 600 /identities/identity-$ORD/identity.edn /var/lib/tatara/identity.edn
+    unset http_proxy https_proxy
+    # The identity stays root-only; steps run as uid 20000 and cannot read it.
+    install -d -m 711 /var/lib/tatara /var/lib/tatara/work
+    install -m 600 /identity/identity.edn /var/lib/tatara/identity.edn
     cat > /var/lib/tatara/runner.edn <<EOF
     {:coordinator "$COORDINATOR"
      :identity "/var/lib/tatara/identity.edn"
      :work "/var/lib/tatara/work"
      :tiers [:t2]
      :poll-ms 10000
-     :network-enforcement $NETWORK_ENFORCEMENT}
+     :network-enforcement :unshare
+     :step-user {:uid 20000 :gid 20000}
+     :fetch {:proxy "$PROXY"}}
     EOF
-    echo "runner $POD_NAME ($ORD) $(grep -oE ':did "[^"]+"' /var/lib/tatara/identity.edn); node $(node --version); $(bb --version); tatara $(git -C /opt/tatara rev-parse --short HEAD)"
-    until curl -s -m 5 -o /dev/null "$COORDINATOR/"; do echo "waiting for tailnet route to coordinator"; sleep 5; done
+    echo "runner $POD_NAME ($ORD) $(grep -oE ':did "[^"]+"' /var/lib/tatara/identity.edn); node $(node --version); $(bb --version); tatara $(git -C /opt/tatara rev-parse --short HEAD); uid_map $(cat /proc/self/uid_map | tr -s ' ')"
+    until curl -s -m 5 -o /dev/null "$COORDINATOR/"; do echo "waiting for coordinator"; sleep 5; done
     cd /opt/tatara/packages/tatara-runner && exec bb run /var/lib/tatara/runner.edn
 ---
+# One StatefulSet per identity (N = 0, 1, 2); they differ only in the name, label and Secret.
 apiVersion: apps/v1
 kind: StatefulSet
-metadata: {name: tatara-runner, namespace: tatara}
+metadata: {name: tatara-runner-0, namespace: tatara, labels: {app: tatara-runner}}
 spec:
   serviceName: tatara-runner
   replicas: 0
-  podManagementPolicy: Parallel
-  selector: {matchLabels: {app: tatara-runner}}
+  selector: {matchLabels: {app: tatara-runner, tatara.network/identity: "0"}}
   template:
-    metadata: {labels: {app: tatara-runner}}
+    metadata: {labels: {app: tatara-runner, tatara.network/identity: "0"}}
     spec:
+      hostUsers: false
+      automountServiceAccountToken: false
+      enableServiceLinks: false
       terminationGracePeriodSeconds: 60
+      # No cluster DNS: the pod talks to fixed ClusterIPs only; the proxy resolves names.
+      dnsPolicy: None
+      dnsConfig: {nameservers: ["127.0.0.1"]}
+      nodeSelector: {tatara.network/role: runner}
+      tolerations: [{key: tatara.network/runner, operator: Equal, value: ci, effect: NoSchedule}]
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector: {matchLabels: {app: tatara-runner}}
+              topologyKey: kubernetes.io/hostname
+      securityContext: {seccompProfile: {type: RuntimeDefault}}
       containers:
-        - name: tailscale
-          image: tailscale/tailscale:v1.104.7
-          env:
-            - {name: POD_NAME, valueFrom: {fieldRef: {fieldPath: metadata.name}}}
-            - {name: TS_HOSTNAME, value: "vke-$(POD_NAME)"}
-            - {name: TS_AUTHKEY, valueFrom: {secretKeyRef: {name: tailscale-auth, key: TS_AUTHKEY}}}
-            - {name: TS_KUBE_SECRET, value: ""}
-            - {name: TS_USERSPACE, value: "false"}
-            - {name: TS_STATE_DIR, value: /var/lib/tailscale}
-            - {name: TS_EXTRA_ARGS, value: "--accept-dns=false"}
-          securityContext: {capabilities: {add: [NET_ADMIN, NET_RAW]}}
-          volumeMounts:
-            - {name: dev-tun, mountPath: /dev/net/tun}
-            - {name: ts-state, mountPath: /var/lib/tailscale}
-          resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {memory: 256Mi}}
         - name: runner
           image: ubuntu:24.04
           command: ["/bin/sh", "/boot/boot.sh"]
           env:
             - {name: POD_NAME, valueFrom: {fieldRef: {fieldPath: metadata.name}}}
-            - {name: TATARA_REV, value: "6c3b3aac61023e87fbe93797c4304621169651a5"}
-            - {name: COORDINATOR, value: "http://100.108.223.94:8790"}
-            - {name: NETWORK_ENFORCEMENT, value: ":unshare"}
-          securityContext: {capabilities: {add: [SYS_ADMIN]}}
+            - {name: TATARA_REV, value: "TATARA_REV_PLACEHOLDER"}
+            - {name: COORDINATOR, value: "http://10.96.79.90:8790"}
+            - {name: PROXY, value: "http://10.96.79.128:3128"}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL], add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, SYS_ADMIN]}
           volumeMounts:
             - {name: boot, mountPath: /boot}
-            - {name: identities, mountPath: /identities, readOnly: true}
-          resources: {requests: {cpu: "1500m", memory: 3Gi}, limits: {cpu: "3500m", memory: 6Gi}}
+            - {name: identity, mountPath: /identity, readOnly: true}
+          resources: {requests: {cpu: 150m, memory: 1Gi}, limits: {cpu: "1", memory: 1536Mi}}
       volumes:
         - {name: boot, configMap: {name: tatara-runner-boot}}
-        - {name: dev-tun, hostPath: {path: /dev/net/tun, type: CharDevice}}
-        - {name: ts-state, emptyDir: {}}
-        - name: identities
-          projected:
-            sources:
-              - secret: {name: tatara-runner-identity-0, items: [{key: identity.edn, path: identity-0/identity.edn}]}
-              - secret: {name: tatara-runner-identity-1, items: [{key: identity.edn, path: identity-1/identity.edn}]}
-              - secret: {name: tatara-runner-identity-2, items: [{key: identity.edn, path: identity-2/identity.edn}]}
+        - {name: identity, secret: {secretName: tatara-runner-identity-0, defaultMode: 0400}}
+---
+# One StatefulSet per identity (N = 0, 1, 2); they differ only in the name, label and Secret.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: tatara-runner-1, namespace: tatara, labels: {app: tatara-runner}}
+spec:
+  serviceName: tatara-runner
+  replicas: 0
+  selector: {matchLabels: {app: tatara-runner, tatara.network/identity: "1"}}
+  template:
+    metadata: {labels: {app: tatara-runner, tatara.network/identity: "1"}}
+    spec:
+      hostUsers: false
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 60
+      # No cluster DNS: the pod talks to fixed ClusterIPs only; the proxy resolves names.
+      dnsPolicy: None
+      dnsConfig: {nameservers: ["127.0.0.1"]}
+      nodeSelector: {tatara.network/role: runner}
+      tolerations: [{key: tatara.network/runner, operator: Equal, value: ci, effect: NoSchedule}]
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector: {matchLabels: {app: tatara-runner}}
+              topologyKey: kubernetes.io/hostname
+      securityContext: {seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: runner
+          image: ubuntu:24.04
+          command: ["/bin/sh", "/boot/boot.sh"]
+          env:
+            - {name: POD_NAME, valueFrom: {fieldRef: {fieldPath: metadata.name}}}
+            - {name: TATARA_REV, value: "TATARA_REV_PLACEHOLDER"}
+            - {name: COORDINATOR, value: "http://10.96.79.90:8790"}
+            - {name: PROXY, value: "http://10.96.79.128:3128"}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL], add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, SYS_ADMIN]}
+          volumeMounts:
+            - {name: boot, mountPath: /boot}
+            - {name: identity, mountPath: /identity, readOnly: true}
+          resources: {requests: {cpu: 150m, memory: 1Gi}, limits: {cpu: "1", memory: 1536Mi}}
+      volumes:
+        - {name: boot, configMap: {name: tatara-runner-boot}}
+        - {name: identity, secret: {secretName: tatara-runner-identity-1, defaultMode: 0400}}
+---
+# One StatefulSet per identity (N = 0, 1, 2); they differ only in the name, label and Secret.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: tatara-runner-2, namespace: tatara, labels: {app: tatara-runner}}
+spec:
+  serviceName: tatara-runner
+  replicas: 0
+  selector: {matchLabels: {app: tatara-runner, tatara.network/identity: "2"}}
+  template:
+    metadata: {labels: {app: tatara-runner, tatara.network/identity: "2"}}
+    spec:
+      hostUsers: false
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 60
+      # No cluster DNS: the pod talks to fixed ClusterIPs only; the proxy resolves names.
+      dnsPolicy: None
+      dnsConfig: {nameservers: ["127.0.0.1"]}
+      nodeSelector: {tatara.network/role: runner}
+      tolerations: [{key: tatara.network/runner, operator: Equal, value: ci, effect: NoSchedule}]
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector: {matchLabels: {app: tatara-runner}}
+              topologyKey: kubernetes.io/hostname
+      securityContext: {seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: runner
+          image: ubuntu:24.04
+          command: ["/bin/sh", "/boot/boot.sh"]
+          env:
+            - {name: POD_NAME, valueFrom: {fieldRef: {fieldPath: metadata.name}}}
+            - {name: TATARA_REV, value: "TATARA_REV_PLACEHOLDER"}
+            - {name: COORDINATOR, value: "http://10.96.79.90:8790"}
+            - {name: PROXY, value: "http://10.96.79.128:3128"}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL], add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, SYS_ADMIN]}
+          volumeMounts:
+            - {name: boot, mountPath: /boot}
+            - {name: identity, mountPath: /identity, readOnly: true}
+          resources: {requests: {cpu: 150m, memory: 1Gi}, limits: {cpu: "1", memory: 1536Mi}}
+      volumes:
+        - {name: boot, configMap: {name: tatara-runner-boot}}
+        - {name: identity, secret: {secretName: tatara-runner-identity-2, defaultMode: 0400}}

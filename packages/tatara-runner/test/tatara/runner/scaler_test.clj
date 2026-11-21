@@ -34,3 +34,8 @@
     (is (= {:replicas 0 :idle-since 0}
            (s/decide opts {:current 3 :demand (:demand (s/observed-demand #(throw (Exception. "x"))))
                            :idle-since 0 :now 600000})))))
+
+(deftest one-statefulset-per-identity
+  (is (= {"r0" 1 "r1" 1 "r2" 0} (s/targets ["r0" "r1" "r2"] 2)))
+  (is (= {"r0" 0 "r1" 0 "r2" 0} (s/targets ["r0" "r1" "r2"] 0)))
+  (is (= {"r0" 1 "r1" 1 "r2" 1} (s/targets ["r0" "r1" "r2"] 5))))

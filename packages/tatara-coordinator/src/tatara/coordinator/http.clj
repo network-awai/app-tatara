@@ -68,7 +68,7 @@
         (cond
           (and (= m :post) (= uri "/v1/lease"))
           (let [b (signed-body req now)
-                r (mutate! srv #(svc/lease-job cfg % b (token) now))]
+                r (mutate! srv #(svc/lease-job cfg % b (token) now (:remote-addr req)))]
             (reply (status-of r) r))
 
           (and (= m :post) (= uri "/v1/heartbeat"))
@@ -115,7 +115,7 @@
 
           (and (= m :post) (= uri "/v1/complete"))
           (let [b (signed-body req now)
-                r (mutate! srv #(svc/complete cfg % (dissoc b :ts) now (partial cas-has? root)))]
+                r (mutate! srv #(svc/complete cfg % (dissoc b :ts) now (partial cas-has? root) (:remote-addr req)))]
             (reply (status-of r) r))
 
           (and (= m :post) (= uri "/v1/runs"))
@@ -134,12 +134,36 @@
                 (reply 400 {:error :bad-older-than-ms})
                 (reply 200 (mutate! srv #(svc/expire-stale % now ttl))))))
 
+          (and (= m :post) (= uri "/v1/admin/rerun"))
+          (if-not (and admin-token (= (str "Bearer " admin-token) (get-in req [:headers "authorization"])))
+            (reply 401 {:error :unauthorized})
+            (let [b (edn/read-string (String. ^bytes (or (read-bytes req max-body-bytes) (byte-array 0)) "UTF-8"))
+                  ids (:run-ids b)]
+              (if-not (and (vector? ids) (every? string? ids))
+                (reply 400 {:error :bad-run-ids})
+                (reply 200 (mutate! srv #(svc/rerun % ids now))))))
+
+          (and (= m :get) (= uri "/v1/metrics/dora"))
+          (let [days (or (some-> (second (re-find #"(?:^|&)days=([0-9]+)" (or (:query-string req) ""))) parse-long) 7)]
+            (reply 200 {:window-days days :at now :repos (svc/dora @state now (* days 86400000))}))
+
           (and (= m :get) (= uri "/v1/queue"))
           (let [tier (keyword (or (second (re-find #"(?:^|&)tier=([a-z0-9-]+)" (or (:query-string req) ""))) "t2"))]
             (reply 200 (svc/queue-depth @state now tier)))
 
           (and (= m :get) (= uri "/v1/runs"))
           (reply 200 (->> (:runs @state) keys (map #(svc/run-view @state %)) (sort-by :created) vec))
+
+          ;; The step log of one replica, so a failed status links to why (AWAI-3799).
+          (and (= m :get) (re-matches #"/v1/runs/[^/]+/log/[0-9]+" uri))
+          (let [[_ id idx] (re-matches #"/v1/runs/([^/]+)/log/([0-9]+)" uri)
+                job (some #(when (and (= id (:run-id %)) (= (parse-long idx) (:index %))) %) (vals (:jobs @state)))
+                receipt (some->> (:receipt-cid job) (store/read-object root))
+                sha (:log-sha256 receipt)]
+            (if (and sha (store/has-blob? root sha))
+              {:status 200 :headers {"content-type" "text/plain; charset=utf-8"}
+               :body (java.io.File. (str (store/blob-path root sha)))}
+              (reply 404 {:error :unknown-log})))
 
           (and (= m :get) (str/starts-with? uri "/v1/runs/") (str/ends-with? uri "/bundle"))
           (let [id (subs uri (count "/v1/runs/") (- (count uri) (count "/bundle")))]
@@ -191,6 +215,13 @@
   "Close :pending runs older than ttl-ms (svc/expire-stale). Persisted."
   [srv ttl-ms]
   (mutate! srv #(svc/expire-stale % ((:clock srv)) ttl-ms)))
+
+(defn gc-snapshots!
+  "Delete source-snapshot blobs of runs closed longer than retention-ms ago
+  (svc/collectable-snapshots). Returns the number of blobs removed."
+  [srv retention-ms]
+  (let [shas (svc/collectable-snapshots @(:state srv) ((:clock srv)) retention-ms)]
+    (count (filter #(store/delete-blob! (:root srv) %) shas))))
 
 (defn mark-delivered!
   "Record that an outbox action reached its destination. Persisted."

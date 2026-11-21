@@ -78,17 +78,22 @@
       (is (= [:failed] (mapv :result (:entries (run-view env)))))
       (finally (srv/stop! s)))))
 
-(deftest a-checkout-that-differs-from-the-leased-pipeline-is-refused
-  (let [{:keys [s ra] :as env} (setup ok-pipeline (assoc ok-pipeline :steps [["bb" "-e" "(println :other)"]]))]
-    (try
-      (is (= :checkout-pipeline-mismatch (:refused (apply core/run-once ra))))
-      (is (empty? (:entries (run-view env))))
-      (finally (srv/stop! s)))))
+(deftest the-leased-pipeline-runs-even-when-the-checkout-differs
+  (testing "a PR's own .tatara/pipeline.edn is ignored; the trusted, leased one runs (AWAI-3799)"
+    (let [{:keys [s ra] :as env} (setup ok-pipeline (assoc ok-pipeline :network :fetch
+                                                           :steps [["bb" "-e" "(System/exit 9)"]]))]
+      (try
+        (apply core/run-once ra)
+        (is (= [:passed] (mapv :result (:entries (run-view env)))))
+        (finally (srv/stop! s))))))
 
 (deftest validation-rules
   (let [job (fn [p] {:pipeline p :pipeline-cid (c/cid crypto/ctx p)})]
     (is (:ok (core/validate (job ok-pipeline))))
-    (is (:ok (core/validate (job (assoc ok-pipeline :network :fetch)))))
+    (testing ":fetch only with an egress proxy configured"
+      (is (= :fetch-not-allowed (:error (core/validate (job (assoc ok-pipeline :network :fetch))))))
+      (is (= :fetch-not-allowed (:error (core/validate (job (assoc ok-pipeline :network :fetch)) {}))))
+      (is (:ok (core/validate (job (assoc ok-pipeline :network :fetch)) {:fetch {:proxy "http://egress:3128"}}))))
     (is (= :network-not-allowed (:error (core/validate (job (assoc ok-pipeline :network :any))))))
     (is (= :not-argv (:error (core/validate (job (assoc ok-pipeline :steps ["make test"]))))))
     (is (= :wrong-tier (:error (core/validate (job (assoc ok-pipeline :tier :t1))))))
@@ -103,3 +108,16 @@
   (testing ":fetch and :none without enforcement are not wrapped"
     (is (= ["bb" "ci"] (core/wrap-network ["bb" "ci"] :fetch :unshare)))
     (is (= ["bb" "ci"] (core/wrap-network ["bb" "ci"] :none :none)))))
+
+(deftest steps-drop-to-the-step-user
+  (let [u {:uid 20000 :gid 20000}]
+    (testing "inside the pod: drop to the step user, then unshare its own user and net namespace (AWAI-3799)"
+      (let [w (core/wrap-network ["bb" "ci"] :none :unshare u)]
+        (is (= ["setpriv" "--reuid=20000" "--regid=20000" "--clear-groups" "--inh-caps=-all" "--no-new-privs" "--"
+                "unshare" "--user" "--map-root-user" "--net" "--"] (subvec w 0 12)))
+        (is (re-find #"ip link set lo up && exec setpriv --bounding-set=-all" (nth w 14)))
+        (is (= ["bb" "ci"] (subvec w (- (count w) 2))))))
+    (testing ":fetch steps also drop privileges and get only the proxy"
+      (is (= "setpriv" (first (core/wrap-network ["npm" "ci"] :fetch :unshare u))))
+      (is (= "http://egress:3128" (get (core/fetch-env {:fetch {:proxy "http://egress:3128"}} :fetch) "HTTPS_PROXY")))
+      (is (= {} (core/fetch-env {:fetch {:proxy "http://egress:3128"}} :none))))))
