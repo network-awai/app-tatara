@@ -1,0 +1,104 @@
+# Kagitaba minter on VKE (AWAI-3820 item 1, owner decision D1: VKE next to the coordinator).
+# Why: the coordinator runs on VKE but every GitHub token still comes from the minter on the
+# laptop (21mbp), which sleeps; its vault (81 MB, 11,530 signed ledger entries on 2026-11-18)
+# made one lease take 204 s under load. Co-location drops lease latency to in-cluster RTT.
+# - Node pool tatara-system (same as the coordinator; runner pods cannot schedule here).
+# - State (vault.json) on a 5 Gi Retain volume; the migrated vault keeps its full ledger.
+#   Compaction is follow-up work: kagitaba-store has no prune support yet.
+# - Fixed ClusterIP 10.96.79.91:8795 (.90 is the coordinator, .128 the egress proxy).
+#   The coordinator's :lease url moves here from the laptop tailnet address (ConfigMap edit).
+# - Not in Git: ConfigMap kagitaba-minter-config (minter.json: vault, listen, issuer_item,
+#   requesters incl. the coordinator DID; copy the working file from 21mbp and set
+#   "listen": "0.0.0.0:8795", "vault": "/var/lib/kagitaba/state/vault.json") and Secret
+#   kagitaba-minter-secrets (device-key: 32 raw bytes exported from the 21mbp login keychain
+#   item "minter-device-key-v1"). See minter-runbook.md.
+# - Boot builds kagitaba-minter from a pinned app-kagitaba rev with a pinned rustup toolchain
+#   (no image registry, D2). Fill KAGITABA_REV at apply time, like TATARA_REV_PLACEHOLDER.
+# - NetworkPolicy (network-policy.yaml, minter section): ingress 8795 from the coordinator
+#   only; egress DNS + public internet (GitHub API for leases; same shape as the coordinator,
+#   which runs no PR code).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: kagitaba-minter-state, namespace: tatara}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: vultr-block-storage-retain
+  resources: {requests: {storage: 5Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: kagitaba-minter, namespace: tatara}
+spec:
+  clusterIP: 10.96.79.91
+  selector: {app: kagitaba-minter}
+  ports: [{name: http, port: 8795, targetPort: 8795}]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: kagitaba-minter-boot, namespace: tatara}
+data:
+  boot.sh: |
+    #!/bin/sh
+    set -eu
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -q >/dev/null && apt-get install -y -q git curl ca-certificates build-essential pkg-config >/dev/null
+    T=$(mktemp -d); cd "$T"
+    # rustup-init, verified 2026-11-22. If the digest check fails, upstream rotated the
+    # installer: re-fetch https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init.sha256
+    # and update the pin below (loud failure is the point; never skip the check).
+    curl -fsSLo rustup-init https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
+    echo "b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55  rustup-init" | sha256sum -c - >/dev/null || { echo "digest mismatch: rustup-init" >&2; exit 3; }
+    chmod +x rustup-init
+    ./rustup-init -y --profile minimal --default-toolchain 1.98.1 >/dev/null
+    export PATH="$HOME/.cargo/bin:$PATH"
+    echo "rustc $(rustc --version)"
+    git clone -q https://github.com/network-awai/app-kagitaba.git /opt/kagitaba && git -C /opt/kagitaba checkout -q --detach "$KAGITABA_REV"
+    cargo build --release --manifest-path /opt/kagitaba/Cargo.toml -p kagitaba-minter
+    install -d -m 700 /var/lib/kagitaba/state
+    VAULT=/var/lib/kagitaba/state/vault.json
+    if [ ! -f "$VAULT" ]; then
+      echo "minter: $VAULT is missing. Seed it, then delete this pod:" >&2
+      echo "  kubectl -n tatara cp <21mbp-vault.json> deploy/kagitaba-minter:/var/lib/kagitaba/state/vault.json" >&2
+      echo "minter: minter $(git -C /opt/kagitaba rev-parse --short HEAD); $(rustc --version)"
+      sleep 86400
+    fi
+    export KAGITABA_DEVICE_KEY_FILE=/secrets/device-key
+    echo "minter $(git -C /opt/kagitaba rev-parse --short HEAD); $(rustc --version)"
+    exec /opt/kagitaba/target/release/kagitaba-minter serve --config /config/minter.json
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: kagitaba-minter, namespace: tatara}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: kagitaba-minter}}
+  template:
+    metadata: {labels: {app: kagitaba-minter}}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      nodeSelector: {tatara.network/role: system}
+      securityContext: {seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: minter
+          image: ubuntu:24.04
+          command: ["/bin/sh", "/boot/boot.sh"]
+          env:
+            - {name: KAGITABA_REV, value: "KAGITABA_REV_PLACEHOLDER"}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL], add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]}
+          ports: [{containerPort: 8795}]
+          readinessProbe: {httpGet: {path: /v1/health, port: 8795}, periodSeconds: 15, timeoutSeconds: 5}
+          volumeMounts:
+            - {name: boot, mountPath: /boot}
+            - {name: config, mountPath: /config, readOnly: true}
+            - {name: secrets, mountPath: /secrets, readOnly: true}
+            - {name: state, mountPath: /var/lib/kagitaba/state, subPath: state}
+          resources: {requests: {cpu: 250m, memory: 512Mi}, limits: {memory: 2Gi}}
+      volumes:
+        - {name: boot, configMap: {name: kagitaba-minter-boot}}
+        - {name: config, configMap: {name: kagitaba-minter-config}}
+        - {name: secrets, secret: {secretName: kagitaba-minter-secrets, defaultMode: 0400}}
+        - {name: state, persistentVolumeClaim: {claimName: kagitaba-minter-state}}
