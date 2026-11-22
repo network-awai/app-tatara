@@ -3,7 +3,9 @@
 # Its own NetworkPolicy (network-policy.yaml) allows the public internet only, so an allowed name that
 # resolves to a private, tailnet (100.64.0.0/10) or metadata address is still unreachable.
 # The allowlist is the initial D3 set (plan §1.3): package sources the pipelines and the boot script
-# use today. Changing it is a reviewed change to this file, not something a pipeline can do.
+# use today. The APK lane (AWAI-3834) adds the Gradle wrapper and plugin portal hosts; it also uses
+# dl.google.com / maven.google.com (SDK, AGP), repo.maven.apache.org / repo1.maven.org (Maven Central),
+# registry.npmjs.org, index/static.crates.io, static.rust-lang.org, nodejs.org and the GitHub release hosts. Changing it is a reviewed change to this file, not something a pipeline can do.
 apiVersion: v1
 kind: ConfigMap
 metadata: {name: tatara-egress, namespace: tatara}
@@ -25,6 +27,10 @@ data:
     ^repo\.maven\.apache\.org$
     ^repo1\.maven\.org$
     ^repo\.clojars\.org$
+    ^services\.gradle\.org$
+    ^downloads\.gradle\.org$
+    ^plugins\.gradle\.org$
+    ^plugins-artifacts\.gradle\.org$
   tinyproxy.conf: |
     User tinyproxy
     Group tinyproxy

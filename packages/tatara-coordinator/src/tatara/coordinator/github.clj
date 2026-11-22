@@ -176,7 +176,9 @@
          (try
            (let [r (api gh :post (str "/repos/" (:repo a) "/statuses/" (:sha a))
                         (cond-> {:state (:state a) :context (:context a) :description (:description a)}
-                          (:target-base gh) (assoc :target_url (str (:target-base gh) "/v1/runs/" (:run-id a)))))]
+                          (:target-base gh) (assoc :target_url (str (:target-base gh) "/v1/runs/" (:run-id a)))
+                          ;; A publication links to its artifact in B2 instead (AWAI-3834).
+                          (:target-url a) (assoc :target_url (:target-url a))))]
              (when (<= 200 (:status r) 299) (srv/mark-delivered! server k))
              {:key k :status (:status r)})
            (catch Exception e

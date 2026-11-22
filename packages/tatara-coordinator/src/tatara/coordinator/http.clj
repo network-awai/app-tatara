@@ -77,6 +77,19 @@
                 r (mutate! srv #(svc/heartbeat cfg % b now))]
             (reply (status-of r) r))
 
+          ;; Operator upload of a source snapshot for a manual run (POST /v1/runs), e.g. a
+          ;; public repository no forge lease covers yet (AWAI-3834). Admin token only.
+          (and (= m :put) (str/starts-with? uri "/v1/admin/blob/"))
+          (let [sha (subs uri (count "/v1/admin/blob/"))]
+            (cond
+              (not (and admin-token (= (str "Bearer " admin-token) (get-in req [:headers "authorization"]))))
+              (reply 401 {:error :unauthorized})
+              (not (re-matches #"[0-9a-f]{64}" sha)) (reply 400 {:error :bad-sha})
+              :else (let [data (or (read-bytes req (:max-blob-bytes cfg)) (byte-array 0))]
+                      (if (not= sha (crypto/sha256-bytes data))
+                        (reply 409 {:error :blob-hash-mismatch})
+                        (do (store/put-blob! root sha data) (reply 200 {:ok true :sha256 sha :size (count data)}))))))
+
           (and (= m :put) (str/starts-with? uri "/v1/blob/"))
           (let [sha (subs uri (count "/v1/blob/"))
                 h (:headers req)
@@ -154,8 +167,14 @@
             (reply 200 {:ok (every? #(= :ok (:state %)) (vals ms)) :minter ms :at now}))
 
           (and (= m :get) (= uri "/v1/queue"))
-          (let [tier (keyword (or (second (re-find #"(?:^|&)tier=([a-z0-9-]+)" (or (:query-string req) ""))) "t2"))]
-            (reply 200 (svc/queue-depth @state now tier)))
+          (let [q (or (:query-string req) "")
+                tier (keyword (or (second (re-find #"(?:^|&)tier=([a-z0-9-]+)" q)) "t2"))
+                toolchain (some-> (second (re-find #"(?:^|&)toolchain=([a-z0-9-]+)" q)) keyword)]
+            (reply 200 (svc/queue-depth @state now tier toolchain)))
+
+          ;; Publications to B2 (AWAI-3834): objects, sizes, sha256 and read-back count; no links.
+          (and (= m :get) (= uri "/v1/publications"))
+          (reply 200 (into (sorted-map) (map (fn [[k v]] [k (dissoc v :link)])) (:publications @state)))
 
           (and (= m :get) (= uri "/v1/runs"))
           (reply 200 (->> (:runs @state) keys (map #(svc/run-view @state %)) (sort-by :created) vec))
@@ -228,6 +247,11 @@
   [srv retention-ms]
   (let [shas (svc/collectable-snapshots @(:state srv) ((:clock srv)) retention-ms)]
     (count (filter #(store/delete-blob! (:root srv) %) shas))))
+
+(defn mutate-state!
+  "Apply f (state -> state) under the lock and persist (publication, AWAI-3834)."
+  [srv f]
+  (mutate! srv (fn [s] {:state (f s) :reply {:ok true}})))
 
 (defn mark-delivered!
   "Record that an outbox action reached its destination. Persisted."

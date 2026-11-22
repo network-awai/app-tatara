@@ -53,9 +53,10 @@
   "Demand from the coordinator's small GET /v1/queue (queued + live leases of
   :t2 runs without a toolchain). Expired leases are already counted as queued
   there, and runs past their TTL are closed, so lost leases do not hold nodes."
-  [coordinator]
+  [coordinator & [toolchain]]
   (let [r (p/shell {:out :string :err :string :continue true}
-                   "curl" "-sS" "-f" "-m" "10" (str coordinator "/v1/queue?tier=t2"))]
+                   "curl" "-sS" "-f" "-m" "10"
+                   (str coordinator "/v1/queue?tier=t2" (when toolchain (str "&toolchain=" (name toolchain)))))]
     (when-not (zero? (:exit r))
       (throw (ex-info "coordinator unreachable" {:err (:err r)})))
     (let [{:keys [queued leased]} (edn/read-string (:out r))]
@@ -79,7 +80,8 @@
 (defn -main
   "bb scale SCALER.edn — {:coordinator url :namespace ns
   :statefulsets [\"tatara-runner-0\" ...] :min-replicas 0 :max-replicas 3
-  :idle-seconds 600 :poll-seconds 30}. :statefulset name (one StatefulSet with
+  :idle-seconds 600 :poll-seconds 30}. With :toolchain :android-v1 it counts only runs
+  that need that toolchain (AWAI-3834); without, only runs that need none. :statefulset name (one StatefulSet with
   n replicas) is still accepted for the old layout."
   [config-file]
   (let [{:keys [coordinator namespace statefulset statefulsets poll-seconds idle-seconds] :as cfg}
@@ -96,7 +98,7 @@
             (try
               (let [now-counts (into {} (map (fn [n] [n (get-in (kube "GET" (path n)) [:spec :replicas] 0)])) names)
                     current (reduce + (vals now-counts))
-                    {d :demand err :error data :data} (observed-demand #(queue coordinator))
+                    {d :demand err :error data :data} (observed-demand #(queue coordinator (:toolchain cfg)))
                     _ (when err (println (str (java.time.Instant/now)) "coordinator:" err (pr-str data)))
                     {:keys [replicas idle-since]} (decide opts {:current current :demand d
                                                                 :idle-since idle-since

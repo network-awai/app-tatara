@@ -1,11 +1,14 @@
 {:paths ["src" "test" "../tatara-core/src" "../tatara-coordinator/src" "../tatara-coordinator/test"]
  :tasks {test {:doc "runner e2e against an in-process coordinator (local)"
-               :requires ([clojure.test :as t] [tatara.runner.runner-test] [tatara.runner.scaler-test])
-               :task (let [r (t/run-tests 'tatara.runner.runner-test 'tatara.runner.scaler-test)]
+               :requires ([clojure.test :as t] [tatara.runner.runner-test] [tatara.runner.scaler-test] [tatara.runner.burst-test])
+               :task (let [r (t/run-tests 'tatara.runner.runner-test 'tatara.runner.scaler-test 'tatara.runner.burst-test)]
                        (System/exit (if (t/successful? r) 0 1)))}
          scale {:doc "Run the queue-based StatefulSet scaler: bb scale SCALER.edn"
                 :requires ([tatara.runner.scaler :as s])
                 :task (apply s/-main *command-line-args*)}
+         burst {:doc "Run the on-demand APK pool manager: bb burst BURST.edn"
+                :requires ([tatara.runner.burst :as b])
+                :task (apply b/-main *command-line-args*)}
          run {:doc "Run the runner daemon: bb run RUNNER.edn"
               :requires ([tatara.runner.main :as m])
               :task (apply m/-main *command-line-args*)}}}

@@ -121,3 +121,64 @@
       (is (= "setpriv" (first (core/wrap-network ["npm" "ci"] :fetch :unshare u))))
       (is (= "http://egress:3128" (get (core/fetch-env {:fetch {:proxy "http://egress:3128"}} :fetch) "HTTPS_PROXY")))
       (is (= {} (core/fetch-env {:fetch {:proxy "http://egress:3128"}} :none))))))
+
+;; ── caches (AWAI-3834) ──────────────────────────────────────────────────────
+
+(def cache-pipeline
+  (assoc ok-pipeline
+         :cache [{:name "demo" :env "DEMO_CACHE" :key ["README"]}]
+         :steps [["bb" "-e" (str "(let [d (System/getenv \"DEMO_CACHE\") f (str d \"/seen\")]"
+                                 " (spit \"out.txt\" (str (.exists (java.io.File. f)) \" \" (System/getenv \"TATARA_SOURCE_SHA\")))"
+                                 " (spit f \"x\"))")]]))
+
+(defn cache-run
+  "Run cache-pipeline once for ref/sha with runner cfg cc; return the job's receipt cache report and out.txt."
+  [cc ref sha]
+  (let [s (srv/start! {:root (str (fs/path *dir* (str "coord-" sha))) :allow #{(:did a)} :ttl-ms 60000} {})]
+    (try
+      (let [snap (srv/put-blob! s (tarball cache-pipeline))
+            _ (srv/submit! s {:event {:forge "github" :repo "network-awai/example" :ref ref :sha sha
+                                      :pipeline-cid (c/cid crypto/ctx (assoc cache-pipeline :quorum 1))}
+                              :pipeline (assoc cache-pipeline :quorum 1) :snapshot snap})
+            cfg (assoc cc :keep-work? true :work (str (fs/path *dir* (str "work-" sha))))
+            _ (core/run-once cfg (cl/client (str "http://127.0.0.1:" (:port s)) a))
+            job (first (vals (:jobs @(:state s))))
+            receipt (tatara.coordinator.store/read-object (str (fs/path *dir* (str "coord-" sha))) (:receipt-cid job))
+            out (first (fs/glob (:work cfg) "**/out.txt"))]
+        {:cache (:cache receipt) :out (some-> out str slurp)
+         :result (:result (first (:entries (first (vals (:runs @(:state s)))))))})
+      (finally (srv/stop! s)))))
+
+(deftest caches-are-written-by-main-and-read-by-prs
+  (let [cc {:tiers [:t2] :network-enforcement :none
+            :cache {:root (str (fs/path *dir* "cache")) :envs ["DEMO_CACHE"] :salt "toolchain-1"}}]
+    (testing "a PR head with no entry misses and writes nothing"
+      (let [r (cache-run cc "refs/pull/7/head" "aaa111")]
+        (is (= :passed (:result r)))
+        (is (= :miss (get-in r [:cache "demo" :hit])))
+        (is (not (get-in r [:cache "demo" :saved])))
+        (is (= "false aaa111" (:out r)) "steps see the commit they build")
+        (is (not (fs/exists? (fs/path *dir* "cache" "demo"))))))
+    (testing "a default-branch head misses, then writes the entry"
+      (let [r (cache-run cc "refs/heads/main" "bbb222")]
+        (is (= :miss (get-in r [:cache "demo" :hit])))
+        (is (true? (get-in r [:cache "demo" :saved])))))
+    (testing "the next PR head hits the exact key and does not write"
+      (let [r (cache-run cc "refs/pull/8/head" "ccc333")]
+        (is (= :exact (get-in r [:cache "demo" :hit])))
+        (is (= "true ccc333" (:out r)))
+        (is (not (get-in r [:cache "demo" :saved])))))
+    (testing "steps cannot change the stored entry: they wrote only their copy"
+      (let [[entry] (fs/list-dir (str (fs/path *dir* "cache" "demo")))]
+        (is (= 1 (count (fs/list-dir (str (fs/path *dir* "cache" "demo"))))))
+        (is (fs/exists? (fs/path entry "seen")))))))
+
+(deftest cache-entries-are-validated
+  (let [job (fn [p] {:pipeline p :pipeline-cid (c/cid crypto/ctx p)})
+        cfg {:cache {:root "/cache" :envs ["CARGO_HOME"]}}
+        with (fn [e] (job (assoc ok-pipeline :cache [e])))]
+    (is (:ok (core/validate (with {:name "cargo" :env "CARGO_HOME" :key ["Cargo.lock"]}) cfg)))
+    (is (= :cache-not-available (:error (core/validate (with {:name "cargo" :env "CARGO_HOME" :key ["Cargo.lock"]}) {}))))
+    (is (= :bad-cache-entry (:error (core/validate (with {:name "cargo" :env "PATH" :key ["Cargo.lock"]}) cfg))))
+    (is (= :bad-cache-entry (:error (core/validate (with {:name "cargo" :env "CARGO_HOME" :key ["../x"]}) cfg))))
+    (is (= :bad-cache-entry (:error (core/validate (with {:name "Bad/Name" :env "CARGO_HOME" :key ["x"]}) cfg))))))

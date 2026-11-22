@@ -14,9 +14,22 @@
             [clojure.java.io :as io]
             [tatara.core.canonical :as c]
             [tatara.coordinator.client :as cl]
-            [tatara.coordinator.crypto :as crypto]))
+            [tatara.coordinator.crypto :as crypto]
+            [tatara.runner.cache :as cache]))
 
 (def max-steps 64)
+
+(defn- relative-path? [x]
+  (and (string? x) (seq x) (not (fs/absolute? x)) (not (re-find #"(^|/)\.\.(/|$)" x))))
+
+(defn cache-entry-ok?
+  "A pipeline cache entry {:name \"cargo\" :env \"CARGO_HOME\" :key [\"app/src-tauri/Cargo.lock\"]}:
+  a short name, an environment variable the runner's :cache :envs allows, and
+  relative key files (AWAI-3834)."
+  [cfg {:keys [name env key] :as e}]
+  (and (map? e) (string? name) (re-matches #"[a-z0-9][a-z0-9-]{0,31}" name)
+       (contains? (set (get-in cfg [:cache :envs])) env)
+       (vector? key) (<= 1 (count key) 8) (every? relative-path? key)))
 
 (defn validate
   "T2 job rules: tier, argv-only steps, network :none or :fetch. :fetch runs
@@ -33,6 +46,8 @@
       (and (= :fetch (:network pipeline)) (not (get-in cfg [:fetch :proxy]))) {:error :fetch-not-allowed}
       (not (every? #(and (string? %) (not (fs/absolute? %)) (not (re-find #"(^|/)\.\.(/|$)" %)))
                    (:artifacts pipeline))) {:error :bad-artifact-path}
+      (and (seq (:cache pipeline)) (not (:cache cfg))) {:error :cache-not-available}
+      (not (every? #(cache-entry-ok? cfg %) (:cache pipeline))) {:error :bad-cache-entry}
       :else {:ok true})))
 
 (defn- extract! [^bytes tarball dir]
@@ -86,12 +101,12 @@
 (defn run-steps
   "Run steps in order in dir; stop at the first non-zero exit or the deadline.
   Returns {:steps [{:argv :exit :ms}] :failed? bool}."
-  [{:keys [network-enforcement env step-user] :as cfg} pipeline dir log-file]
+  [{:keys [network-enforcement env step-user] :as cfg} pipeline dir log-file & [extra-env]]
   (let [deadline (+ (System/currentTimeMillis) (* 1000 (:timeout-seconds pipeline 3600)))
         home (str (fs/create-dirs (fs/path dir ".tatara-home")))
         tmp (str (fs/create-dirs (fs/path dir ".tatara-tmp")))
         base-env (merge {"PATH" (System/getenv "PATH") "HOME" home "TMPDIR" tmp "LANG" "C.UTF-8"} env
-                        (fetch-env cfg (:network pipeline :none)))]
+                        extra-env (fetch-env cfg (:network pipeline :none)))]
     (when-let [{:keys [uid gid]} step-user]
       (p/shell "chown" "-R" (str uid ":" (or gid uid)) (str dir)))
     (loop [[argv & more] (:steps pipeline) done []]
@@ -141,11 +156,19 @@
               (let [log (fs/file dir "log.txt")
                     hb (future (loop [] (Thread/sleep (long (max 1000 (quot (:ttl-ms job 120000) 3))))
                                  (cl/heartbeat c job) (recur)))
-                    {:keys [steps failed?]} (try (run-steps cfg (:pipeline job) src log)
+                    ;; Steps learn which commit they build: a snapshot has no .git (AWAI-3834).
+                    source-env {"TATARA_SOURCE_SHA" (str (:sha job)) "TATARA_REPO" (str (:repo job))
+                                "TATARA_REF" (str (:ref job))}
+                    {cache-env :env cache-report :report} (if (seq (:cache (:pipeline job)))
+                                                            (cache/restore! cfg (:pipeline job) src)
+                                                            {})
+                    {:keys [steps failed?]} (try (run-steps cfg (:pipeline job) src log (merge source-env cache-env))
                                                  (finally (future-cancel hb)))
                     names (sort (:artifacts (:pipeline job)))
                     present (filter #(fs/regular-file? (fs/file src %)) names)
                     passed? (and (not failed?) (= (count present) (count names)))
+                    cache-report (when cache-report
+                                   (cache/save! cfg job (:pipeline job) src cache-report passed?))
                     artifacts (if passed?
                                 (mapv (fn [n] {:name n :cid (upload-file-artifact c job (fs/file src n))}) names)
                                 [])
@@ -156,7 +179,8 @@
                     receipt (upload-object c job {:job-id (:job-id job) :steps steps
                                                   :log-sha256 (:sha log-blob)
                                                   :network (:network (:pipeline job) :none)
-                                                  :network-enforcement (:network-enforcement cfg)})
+                                                  :network-enforcement (:network-enforcement cfg)
+                                                  :cache cache-report :toolchain-id (get-in cfg [:cache :salt])})
                     snapshot (upload-object c job {:sha (:sha job) :tarball-sha256 (:sha256 snap)})]
                 (when-not (:keep-work? cfg) (fs/delete-tree dir))
                 (:body (cl/complete c job verdict vcid receipt snapshot))))))))))
@@ -164,7 +188,7 @@
 (defn run-once
   "Lease one job and process it. Returns :idle, or the processing result."
   [cfg c]
-  (let [l (cl/lease c (:tiers cfg [:t2]))]
+  (let [l (cl/lease c (:tiers cfg [:t2]) (:toolchain-only? cfg))]
     (cond
       (= :no-job (get-in l [:body :error])) :idle
       (not= 200 (:status l)) {:lease-error l}

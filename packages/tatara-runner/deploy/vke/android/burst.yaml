@@ -1,0 +1,96 @@
+# On-demand pool manager for the APK lane (AWAI-3834, tatara.runner.burst). NOT APPLIED until it has its own
+# Vultr key on a [vke]-only sub-user (owner step; separate from the build-reaper's key). Until then the pool is
+# created and deleted from the operator's Mac with pool-local.sh (60 min deadline, delete on exit).
+# - Namespace tatara-burst holds only this Deployment and Secret vultr-api. Its service account has no RBAC
+#   and no token; no other service account can read Secrets here (none is bound to a Role in this namespace).
+# - Egress: DNS, the public internet on 443 (api.vultr.com, GitHub for the boot) and the coordinator. No
+#   tailnet, RFC1918 (other than the coordinator) or metadata address.
+# - It creates, and deletes after 900 s without demand, only the pool labelled awai-apk-burst with node label
+#   awai.network/burst=awai-apk-burst; every delete re-reads the pool and re-checks that. The build-reaper
+#   (AWAI-3664) is the backstop: the pool carries awai.network/reapable=true.
+# Secret: kubectl -n tatara-burst create secret generic vultr-api --from-file=api-key=/dev/stdin  (key on stdin)
+apiVersion: v1
+kind: Namespace
+metadata: {name: tatara-burst}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: tatara-burst, namespace: tatara-burst}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: tatara-burst-boot, namespace: tatara-burst}
+data:
+  boot.sh: |
+    #!/bin/sh
+    set -eu
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -q >/dev/null && apt-get install -y -q git curl ca-certificates >/dev/null
+    T=$(mktemp -d); cd "$T"
+    curl -fsSLo bb.tgz https://github.com/babashka/babashka/releases/download/v1.12.218/babashka-1.12.218-linux-amd64-static.tar.gz
+    echo "7bd028cc794732ffde3da31ce4379840893c8e54f1046f92a8dfc4f4b3cddaf8  bb.tgz" | sha256sum -c - >/dev/null || { echo "digest mismatch: bb" >&2; exit 3; }
+    tar -xzf bb.tgz -C /usr/local/bin bb
+    git clone -q https://github.com/network-awai/app-tatara.git /opt/tatara && git -C /opt/tatara checkout -q --detach "$TATARA_REV"
+    cat > /tmp/burst.edn <<EOF
+    {:coordinator "http://10.96.79.90:8790" :toolchain :android-v1
+     :cluster "3f1932a3-896f-417a-a1e4-9d0ef6b57711" :label "awai-apk-burst" :plan "vc2-4c-8gb"
+     :idle-seconds 900 :max-pool-hours 4 :poll-seconds 30 :token-file "/secrets/vultr/api-key" :dry-run? $DRY_RUN}
+    EOF
+    cd /opt/tatara/packages/tatara-runner && exec bb burst /tmp/burst.edn
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: tatara-burst, namespace: tatara-burst}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: tatara-burst}}
+  template:
+    metadata: {labels: {app: tatara-burst}}
+    spec:
+      serviceAccountName: tatara-burst
+      automountServiceAccountToken: false
+      hostUsers: false
+      enableServiceLinks: false
+      nodeSelector: {tatara.network/role: system}
+      securityContext: {seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: burst
+          image: ubuntu:24.04@sha256:9c7f200c07e3d4a03e7249d2c16bf66a51120fb876aa2242cf31451412543289
+          command: ["/bin/sh", "/boot/boot.sh"]
+          env:
+            - {name: TATARA_REV, value: "TATARA_REV_PLACEHOLDER"}
+            - {name: DRY_RUN, value: "false"}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL], add: [SETUID, SETGID, CHOWN, DAC_OVERRIDE, FOWNER]}
+          volumeMounts:
+            - {name: boot, mountPath: /boot}
+            - {name: vultr, mountPath: /secrets/vultr, readOnly: true}
+          resources: {requests: {cpu: 20m, memory: 128Mi}, limits: {memory: 384Mi}}
+      volumes:
+        - {name: boot, configMap: {name: tatara-burst-boot}}
+        - {name: vultr, secret: {secretName: vultr-api, defaultMode: 0400}}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny, namespace: tatara-burst}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: burst-egress, namespace: tatara-burst}
+spec:
+  podSelector: {matchLabels: {app: tatara-burst}}
+  policyTypes: [Egress]
+  egress:
+    - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}, podSelector: {matchLabels: {k8s-app: kube-dns}}}]
+      ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+    - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: tatara}}, podSelector: {matchLabels: {app: tatara-coordinator}}}]
+      ports: [{port: 8790, protocol: TCP}]
+    - to:
+        - ipBlock: {cidr: 0.0.0.0/0, except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 127.0.0.0/8]}
+      ports: [{port: 443, protocol: TCP}, {port: 80, protocol: TCP}]

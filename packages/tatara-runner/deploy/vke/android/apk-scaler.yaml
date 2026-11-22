@@ -1,0 +1,42 @@
+# Scaler for the APK lane (AWAI-3834): the same boot as ../scaler.yaml, for runs that need :android-v1 only.
+# It sets tatara-runner-apk-0 to 1 on demand and back to 0 after 600 s without; the pod then waits for the
+# awai-apk-burst pool (burst.yaml or pool-local.sh), which is deleted after 900 s without demand.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: tatara-scaler-apk, namespace: tatara}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: tatara-scaler, tatara.network/lane: apk}}
+  template:
+    metadata: {labels: {app: tatara-scaler, tatara.network/lane: apk}}
+    spec:
+      serviceAccountName: tatara-scaler
+      hostUsers: false
+      enableServiceLinks: false
+      dnsPolicy: None
+      dnsConfig: {nameservers: ["127.0.0.1"]}
+      nodeSelector: {tatara.network/role: system}
+      securityContext: {seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: scaler
+          image: ubuntu:24.04
+          command: ["/bin/sh", "/boot/boot.sh"]
+          env:
+            - {name: TATARA_REV, value: "TATARA_REV_PLACEHOLDER"}
+            - {name: COORDINATOR, value: "http://10.96.79.90:8790"}
+            - {name: PROXY, value: "http://10.96.79.128:3128"}
+            - {name: KUBERNETES_SERVICE_HOST, value: "10.96.0.1"}
+            - {name: KUBERNETES_SERVICE_PORT, value: "443"}
+            - {name: STATEFULSETS, value: '"tatara-runner-apk-0"'}
+            - {name: TOOLCHAIN, value: "android-v1"}
+            - {name: MIN_REPLICAS, value: "0"}
+            - {name: MAX_REPLICAS, value: "1"}
+            - {name: IDLE_SECONDS, value: "600"}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL], add: [SETUID, SETGID, CHOWN, DAC_OVERRIDE, FOWNER]}
+          volumeMounts: [{name: boot, mountPath: /boot}]
+          resources: {requests: {cpu: 50m, memory: 192Mi}, limits: {memory: 512Mi}}
+      volumes:
+        - {name: boot, configMap: {name: tatara-scaler-boot}}

@@ -1,0 +1,130 @@
+# Tatara APK lane (AWAI-3834): one runner identity for the Android toolchain :android-v1, on the on-demand
+# pool awai-apk-burst (vc2-4c-8gb, created and deleted by tatara-burst, see burst.yaml). Same hardening as
+# the T2 runners (AWAI-3799, ../tatara-runner.yaml): own user namespace, RuntimeDefault seccomp, no service
+# account token, no DNS, egress only to the coordinator and the allowlist proxy (network-policy.yaml applies:
+# label app=tatara-runner). Steps run as uid 20000 with no capabilities and no_new_privs.
+# - No signing key on CI, ever: the pipeline builds debug APKs (Android debug keystore, generated per build).
+#   Production signing happens on the signing Mac.
+# - Toolchain: install.sh puts the pinned components of toolchain.tsv under /cache/toolchain/<sha256 of the
+#   TSV> on the cache volume, and checks their sha256 tree digests on every boot (manifest.lock).
+# - Build caches (cargo, Gradle, npm) live under /cache/build, written only by passed default-branch runs
+#   (tatara.runner.cache). Steps can read the volume but not write it.
+# - The base image is pinned by digest.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: tatara-apk-cache, namespace: tatara}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: vultr-block-storage-hdd-retain
+  resources: {requests: {storage: 60Gi}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: tatara-runner-apk-boot, namespace: tatara}
+data:
+  rustup: |
+    #!/bin/sh
+    # tauri's android init asks rustup for the installed targets and adds missing ones. The toolchain
+    # is a fixed sysroot without rustup (toolchain.tsv): report what it has, refuse to add anything else.
+    have="x86_64-unknown-linux-gnu aarch64-linux-android"
+    case "$*" in
+      "target list --installed") for t in $have; do echo "$t"; done ;;
+      "target list"*) for t in $have; do echo "$t (installed)"; done ;;
+      "target add"*) shift 2; for t in "$@"; do
+          case " $have " in *" $t "*) echo "info: component 'rust-std' for target '$t' is up to date" ;;
+            *) echo "rustup shim: target $t is not in the pinned toolchain; skipped" >&2 ;; esac; done ;;
+      "--version"|"-V") echo "rustup-shim 1.0 (tatara pinned toolchain)" ;;
+      "show"*|"default"*|"toolchain list"*) echo "1.95.0-x86_64-unknown-linux-gnu (default)" ;;
+      *) echo "rustup shim: unsupported: $*" >&2; exit 1 ;;
+    esac
+  boot.sh: |
+    #!/bin/sh
+    set -eu
+    export DEBIAN_FRONTEND=noninteractive http_proxy="$PROXY" https_proxy="$PROXY"
+    apt-get -o Acquire::http::Proxy="$PROXY" update -q >/dev/null
+    apt-get -o Acquire::http::Proxy="$PROXY" install -y -q git curl xz-utils unzip zip ca-certificates util-linux \
+      iproute2 openssl python3 build-essential file perl >/dev/null
+    T=$(mktemp -d); cd "$T"
+    curl -fsSLo bb.tgz https://github.com/babashka/babashka/releases/download/v1.12.218/babashka-1.12.218-linux-amd64-static.tar.gz
+    echo "7bd028cc794732ffde3da31ce4379840893c8e54f1046f92a8dfc4f4b3cddaf8  bb.tgz" | sha256sum -c - >/dev/null || { echo "digest mismatch: bb" >&2; exit 3; }
+    tar -xzf bb.tgz -C /usr/local/bin bb
+    git clone -q https://github.com/network-awai/app-tatara.git /opt/tatara && git -C /opt/tatara checkout -q --detach "$TATARA_REV"
+    A=/opt/tatara/packages/tatara-runner/deploy/vke/android
+    # The cache volume: root-owned, steps (uid 20000) read only.
+    install -d -m 755 /cache /cache/toolchain /cache/build
+    pin=""; [ -f "$A/toolchain.lock" ] && pin="$A/toolchain.lock"
+    t0=$(date +%s)
+    line=$(sh "$A/install.sh" "$A/toolchain.tsv" /cache "$PROXY" $pin)
+    echo "$line in $(( $(date +%s) - t0 )) s"
+    TC=/cache/toolchain/$(echo "$line" | cut -d' ' -f2)
+    install -d -m 755 /opt/shim && install -m 755 /boot/rustup /opt/shim/rustup
+    unset http_proxy https_proxy
+    install -d -m 711 /var/lib/tatara /var/lib/tatara/work
+    install -m 600 /identity/identity.edn /var/lib/tatara/identity.edn
+    J="-Dhttp.proxyHost=${PROXY_HOST} -Dhttp.proxyPort=3128 -Dhttps.proxyHost=${PROXY_HOST} -Dhttps.proxyPort=3128"
+    cat > /var/lib/tatara/runner.edn <<EOF
+    {:coordinator "$COORDINATOR"
+     :identity "/var/lib/tatara/identity.edn"
+     :work "/var/lib/tatara/work"
+     :tiers [:t2]
+     :toolchain-only? true
+     :poll-ms 10000
+     :network-enforcement :unshare
+     :step-user {:uid 20000 :gid 20000}
+     :fetch {:proxy "$PROXY"}
+     :cache {:root "/cache/build" :salt "$(basename "$TC")" :keep 2
+             :envs ["CARGO_HOME" "CARGO_TARGET_DIR" "GRADLE_USER_HOME" "npm_config_cache"]}
+     :env {"PATH" "$TC/node/bin:$TC/rust/bin:$TC/jdk/bin:/opt/shim:/usr/local/bin:/usr/bin:/bin"
+           "JAVA_HOME" "$TC/jdk"
+           "ANDROID_HOME" "$TC/sdk" "ANDROID_SDK_ROOT" "$TC/sdk"
+           "NDK_HOME" "$TC/sdk/ndk/27.0.12077973"
+           "CARGO_BUILD_JOBS" "4"
+           "CI" "true"
+           "JAVA_TOOL_OPTIONS" "$J"}}
+    EOF
+    echo "runner $POD_NAME (apk) $(grep -oE ':did "[^"]+"' /var/lib/tatara/identity.edn); toolchain $(basename "$TC"); $(bb --version); tatara $(git -C /opt/tatara rev-parse --short HEAD); uid_map $(cat /proc/self/uid_map | tr -s ' ')"
+    until curl -s -m 5 -o /dev/null "$COORDINATOR/"; do echo "waiting for coordinator"; sleep 5; done
+    cd /opt/tatara/packages/tatara-runner && exec bb run /var/lib/tatara/runner.edn
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: tatara-runner-apk-0, namespace: tatara, labels: {app: tatara-runner}}
+spec:
+  serviceName: tatara-runner
+  replicas: 0
+  selector: {matchLabels: {app: tatara-runner, tatara.network/identity: apk-0}}
+  template:
+    metadata: {labels: {app: tatara-runner, tatara.network/identity: apk-0}}
+    spec:
+      hostUsers: false
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 60
+      dnsPolicy: None
+      dnsConfig: {nameservers: ["127.0.0.1"]}
+      # Selecting the pool by its Vultr label makes this pod count as activity for the build-reaper (AWAI-3664).
+      nodeSelector: {vke.vultr.com/node-pool: awai-apk-burst}
+      tolerations: [{key: awai.network/apk, operator: Equal, value: build, effect: NoSchedule}]
+      securityContext: {seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: runner
+          image: ubuntu:24.04@sha256:9c7f200c07e3d4a03e7249d2c16bf66a51120fb876aa2242cf31451412543289
+          command: ["/bin/sh", "/boot/boot.sh"]
+          env:
+            - {name: POD_NAME, valueFrom: {fieldRef: {fieldPath: metadata.name}}}
+            - {name: TATARA_REV, value: "TATARA_REV_PLACEHOLDER"}
+            - {name: COORDINATOR, value: "http://10.96.79.90:8790"}
+            - {name: PROXY, value: "http://10.96.79.128:3128"}
+            - {name: PROXY_HOST, value: "10.96.79.128"}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL], add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, SYS_ADMIN]}
+          volumeMounts:
+            - {name: boot, mountPath: /boot}
+            - {name: identity, mountPath: /identity, readOnly: true}
+            - {name: cache, mountPath: /cache}
+          resources: {requests: {cpu: 2500m, memory: 5Gi}, limits: {cpu: "4", memory: 6800Mi}}
+      volumes:
+        - {name: boot, configMap: {name: tatara-runner-apk-boot}}
+        - {name: identity, secret: {secretName: tatara-runner-identity-apk-0, defaultMode: 0400}}
+        - {name: cache, persistentVolumeClaim: {claimName: tatara-apk-cache}}

@@ -55,6 +55,9 @@ spec:
     - from:
         - podSelector: {matchLabels: {app: tatara-runner}}
         - podSelector: {matchLabels: {app: tatara-scaler}}
+        # The APK pool manager reads GET /v1/queue (AWAI-3834, android/burst.yaml).
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: tatara-burst}}
+          podSelector: {matchLabels: {app: tatara-burst}}
       ports: [{port: 8790, protocol: TCP}]
   egress:
     - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}, podSelector: {matchLabels: {k8s-app: kube-dns}}}]
