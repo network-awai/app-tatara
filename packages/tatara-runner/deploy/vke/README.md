@@ -72,7 +72,8 @@ kubectl -n tatara create secret generic tatara-coordinator-secrets --from-file=a
   --from-file=lease-identity.edn=<file> --from-file=lease-identity-apex-merge.edn=<file>
 # Replace TATARA_REV_PLACEHOLDER with a commit on main, then:
 kubectl apply -f network-policy.yaml -f egress.yaml -f tatara-runner.yaml -f scaler.yaml \
-  -f ../../../tatara-coordinator/deploy/vke/coordinator.yaml
+  -f ../../../tatara-coordinator/deploy/vke/coordinator.yaml \
+  -f ../../../tatara-coordinator/deploy/vke/minter.yaml
 ```
 
 Mac mini runners reach the coordinator over the tailnet at its address, `100.109.2.60:8790` on 2026-11-21.
