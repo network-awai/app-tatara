@@ -167,10 +167,13 @@
   queued in one round, the pending one could reach GitHub last and hide the result."
   [server gh]
   (let [st @(:state server)
-        done (finished-runs st)]
+        done (finished-runs st)
+        ;; Only repos this lease covers: a manual run of another owner's repo (AWAI-3834)
+        ;; waits in the outbox instead of failing with 403 every round.
+        mine (set (:repos gh))]
     (vec
      (for [{k :key a :action} (svc/pending-actions st)
-           :when (= :github-status (:kind a))]
+           :when (and (= :github-status (:kind a)) (or (empty? mine) (contains? mine (:repo a))))]
        (if (and (= "pending" (:state a)) (contains? done (:run-id a)))
          (do (srv/mark-delivered! server k) {:key k :skipped :superseded})
          (try
