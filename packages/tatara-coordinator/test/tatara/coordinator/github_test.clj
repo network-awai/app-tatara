@@ -299,3 +299,16 @@
           (is (= true (deref blocked 5000 false)))
           (doseq [t threads] (.interrupt ^Thread t) (.join ^Thread t 5000))
           (is (every? #(not (.isAlive ^Thread %)) threads)))))))
+
+(deftest statuses-of-repos-outside-the-lease-wait-in-the-outbox
+  (testing "a manual run of another owner's repo is not posted with this lease (AWAI-3834)"
+    (let [root (str (fs/create-temp-dir {:prefix "tatara-gh-scope-"}))
+          posted (atom []) fake (fake-github {} (atom 0) posted)
+          s (srv/start! {:root root :allow #{(:did e2e/a)}} {:clock e2e/clock})
+          g {:api (:api fake) :token "t" :repos [repo]}]
+      (try
+        (srv/submit! s {:event (assoc e2e/event :repo "cloud-itonami/app-other") :pipeline e2e/pipeline})
+        (is (= [] (gh/deliver-once s g)))
+        (is (empty? @posted))
+        (is (= 1 (count (svc/pending-actions @(:state s)))) "kept for a lease that covers the repo")
+        (finally (srv/stop! s) ((:stop fake)) (fs/delete-tree root))))))

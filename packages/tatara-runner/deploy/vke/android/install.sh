@@ -89,4 +89,8 @@ rm -rf "$tmp/dl" "$tmp/sdk/.temp" "$tmp/sdk/.downloadIntermediates"
 cp "$tsv" "$tmp/toolchain.tsv"
 chmod -R go-w "$tmp"; chmod -R a+rX "$tmp"
 mv "$tmp" "$dir"
+# Older toolchains and interrupted installs are not used again: drop them (the volume is 60 Gi).
+for old in "$cache"/toolchain/*; do
+  [ "$old" = "$dir" ] || rm -rf "$old"
+done
 echo "toolchain $id installed"
