@@ -77,7 +77,7 @@
   "Give the runner the first claimable replica of the oldest pending run whose
   tier and toolchain it supports. Toolchains are assigned by the operator.
   origin: the request's source address, recorded on the job."
-  [{:keys [allow ttl-ms runner-toolchains] :as cfg} state {:keys [runner tiers]} token now & [origin]]
+  [{:keys [allow ttl-ms runner-toolchains] :as cfg} state {:keys [runner tiers toolchain-only?]} token now & [origin]]
   (if-not (contains? allow runner)
     {:state state :reply {:error :runner-not-allowed}}
     (let [tiers (set tiers)
@@ -87,7 +87,9 @@
                                                    (contains? tiers (get-in r [:pipeline :tier] :t2))
                                                    (if-let [toolchain (get-in r [:pipeline :toolchain])]
                                                      (contains? toolchains toolchain)
-                                                     true))))
+                                                     ;; A lane runner (the APK pool, AWAI-3834) asks for
+                                                     ;; its toolchain's runs only.
+                                                     (not toolchain-only?)))))
                           (sort-by (fn [[id r]] [(:created r) id])))]
       (loop [[[id r] & more] candidates]
         (if-not id

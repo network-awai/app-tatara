@@ -188,7 +188,7 @@
 (defn run-once
   "Lease one job and process it. Returns :idle, or the processing result."
   [cfg c]
-  (let [l (cl/lease c (:tiers cfg [:t2]))]
+  (let [l (cl/lease c (:tiers cfg [:t2]) (:toolchain-only? cfg))]
     (cond
       (= :no-job (get-in l [:body :error])) :idle
       (not= 200 (:status l)) {:lease-error l}

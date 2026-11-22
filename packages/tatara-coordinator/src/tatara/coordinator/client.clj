@@ -17,7 +17,10 @@
 (defn client [base identity & [clock]]
   {:base base :identity identity :clock (or clock #(System/currentTimeMillis))})
 
-(defn lease [cl tiers] (post cl "/v1/lease" {:tiers (vec tiers)}))
+(defn lease
+  "toolchain-only?: lease only runs that need one of this runner's toolchains (AWAI-3834)."
+  [cl tiers & [toolchain-only?]]
+  (post cl "/v1/lease" (cond-> {:tiers (vec tiers)} toolchain-only? (assoc :toolchain-only? true))))
 
 (defn heartbeat [cl job] (post cl "/v1/heartbeat" (select-keys job [:job-id :token])))
 

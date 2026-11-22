@@ -67,6 +67,7 @@ data:
      :identity "/var/lib/tatara/identity.edn"
      :work "/var/lib/tatara/work"
      :tiers [:t2]
+     :toolchain-only? true
      :poll-ms 10000
      :network-enforcement :unshare
      :step-user {:uid 20000 :gid 20000}

@@ -150,3 +150,13 @@
       (is (= 401 (put "Bearer nope")))
       (is (= 200 (put (str "Bearer " e2e/admin))))
       (finally (srv/stop! s)))))
+
+(deftest a-lane-runner-leases-only-its-toolchain
+  (let [s (start) ca (cl/client (e2e/base s) e2e/a e2e/clock)]
+    (try
+      (binding [e2e/*root* *root*]
+        (e2e/submit s {:event e2e/event :pipeline e2e/pipeline}))
+      (is (= :no-job (get-in (cl/lease ca [:t2] true) [:body :error])) "a plain T2 run is not leased")
+      (binding [e2e/*root* *root*] (e2e/submit s {:event event :pipeline pipeline}))
+      (is (= :android-v1 (get-in (cl/lease ca [:t2] true) [:body :pipeline :toolchain])))
+      (finally (srv/stop! s)))))
