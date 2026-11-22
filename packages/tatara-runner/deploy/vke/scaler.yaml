@@ -3,7 +3,8 @@
 # StatefulSet tatara-runner-N to 0 or 1 through the scale subresource (tatara.runner.scaler): up at once
 # to the open replica jobs (max 3), down to 0 only after IDLE_SECONDS with no demand. An unreachable
 # coordinator counts as no demand. Its service account can only get and patch statefulsets/scale of
-# tatara-runner-0..2.
+# tatara-runner-0..2 and tatara-runner-apk-0. With TOOLCHAIN set (the APK lane, android/apk-scaler.yaml) the
+# same boot scales only STATEFULSETS for runs that need that toolchain (AWAI-3834).
 apiVersion: v1
 kind: ServiceAccount
 metadata: {name: tatara-scaler, namespace: tatara}
@@ -14,7 +15,7 @@ metadata: {name: tatara-scaler, namespace: tatara}
 rules:
   - apiGroups: [apps]
     resources: [statefulsets/scale]
-    resourceNames: [tatara-runner-0, tatara-runner-1, tatara-runner-2]
+    resourceNames: [tatara-runner-0, tatara-runner-1, tatara-runner-2, tatara-runner-apk-0]
     verbs: [get, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -39,9 +40,11 @@ data:
     tar -xzf bb.tgz -C /usr/local/bin bb
     git clone -q https://github.com/network-awai/app-tatara.git /opt/tatara && git -C /opt/tatara checkout -q --detach "$TATARA_REV"
     unset http_proxy https_proxy
+    sts=${STATEFULSETS:-'"tatara-runner-0" "tatara-runner-1" "tatara-runner-2"'}
+    tc=""; [ -n "${TOOLCHAIN:-}" ] && tc=":toolchain :$TOOLCHAIN"
     cat > /tmp/scaler.edn <<EOF
     {:coordinator "$COORDINATOR" :namespace "tatara"
-     :statefulsets ["tatara-runner-0" "tatara-runner-1" "tatara-runner-2"]
+     :statefulsets [$sts] $tc
      :min-replicas $MIN_REPLICAS :max-replicas $MAX_REPLICAS :idle-seconds $IDLE_SECONDS :poll-seconds 30}
     EOF
     until curl -s -m 5 -o /dev/null "$COORDINATOR/"; do echo "waiting for coordinator"; sleep 5; done

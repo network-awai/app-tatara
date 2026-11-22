@@ -1,0 +1,18 @@
+# Tatara Android builder toolchain (AWAI-3834). One line per component: name, version, source, digest.
+# kind: tar|txz|zip = archive we download and check by sha256; sdk = installed by the pinned sdkmanager, which
+# checks Google's sha1 from repository2-3.xml (the only digest Google publishes). After install, install.sh
+# records a sha256 tree digest of every component in the toolchain's manifest.lock, and checks it on every boot.
+# The toolchain id is the sha256 of this file: change a line and a new toolchain directory is built.
+#name	version	kind	url-or-sdk-path	algo	digest
+base-image	ubuntu:24.04	oci	docker.io/library/ubuntu	sha256	9c7f200c07e3d4a03e7249d2c16bf66a51120fb876aa2242cf31451412543289
+jdk	temurin-21.0.13.1+2	tar	https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.13.1%2B2/OpenJDK21U-jdk_x64_linux_hotspot_21.0.13.1_2.tar.gz	sha256	bb8a93f9ae6e7a693b2b721e85dbeff26ae1a77447985a8d7afcdd9c7cf6222e
+node	22.23.5	txz	https://nodejs.org/dist/v22.23.5/node-v22.23.5-linux-x64.tar.xz	sha256	cdeb8670a0c81f51b4dc4ac61919f9b1ad917b304bf8221eb939570663d240f8
+rustc	1.95.0	txz	https://static.rust-lang.org/dist/2026-04-16/rustc-1.95.0-x86_64-unknown-linux-gnu.tar.xz	sha256	8426a3d170a5879f5682f5fbdd024a1779b3951e7baba685af2d6dc32a6dfc15
+cargo	1.95.0	txz	https://static.rust-lang.org/dist/2026-04-16/cargo-1.95.0-x86_64-unknown-linux-gnu.tar.xz	sha256	e74edd2cf7d0f1f1383b4f00eb90c843750bc489e2ccf7214e6476678a907425
+rust-std-x86_64	1.95.0	txz	https://static.rust-lang.org/dist/2026-04-16/rust-std-1.95.0-x86_64-unknown-linux-gnu.tar.xz	sha256	047ea7098803d3500fa1072e9cee5392697e21525559e4458128a2bf874aa382
+rust-std-aarch64-android	1.95.0	txz	https://static.rust-lang.org/dist/2026-04-16/rust-std-1.95.0-aarch64-linux-android.tar.xz	sha256	de5e8fa5d955809891eea77682811fc90be705f78883bd94071e98f5a738d05b
+cmdline-tools	23.0	zip	https://dl.google.com/android/repository/commandlinetools-linux-16111833_latest.zip	sha1	e025545c62a8e64c7559119566a569fb1dec5f60
+build-tools	36.1.0	sdk	build-tools;36.1.0	sha1	936a0d6bd5ae3e2118a7567dddbc95ff67ed46e9
+platform-37.0	2	sdk	platforms;android-37.0	sha1	ed8ebf7f8822a4de5686d427f237d2fa30ff7410
+platform-36	2	sdk	platforms;android-36	sha1	2c1a80dd4d9f7d0e6dd336ec603d9b5c55a6f576
+ndk	27.0.12077973	sdk	ndk;27.0.12077973	sha1	5e5cd517bdb98d7e0faf2c494a3041291e71bdcc

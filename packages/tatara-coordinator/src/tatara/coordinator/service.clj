@@ -24,9 +24,17 @@
 (defn- enqueue [state action]
   (assoc state :outbox (:outbox (outbox/enqueue ctx (:outbox state) action))))
 
-(defn- status-action [run-id {:keys [repo sha]} state description]
+(defn enqueue-action
+  "Queue an outbox action (idempotent by content)."
+  [state action]
+  (enqueue state action))
+
+(defn- status-action
+  "A trusted pipeline may name its status context (:status-context, AWAI-3834),
+  so an APK lane reports beside tatara/ci instead of replacing it."
+  [run-id {:keys [repo sha pipeline]} state description]
   {:kind :github-status :run-id run-id :repo repo :sha sha
-   :state state :context status-context :description description})
+   :state state :context (:status-context pipeline status-context) :description description})
 
 (defn submit-run
   "event: {:forge :repo :ref :sha :pipeline-cid}; pipeline must hash to its CID.
@@ -269,22 +277,25 @@
                      :restore {:count (count (:ms restores)) :median-ms (median (:ms restores)) :open (:open restores)}}])))))
 
 (defn queue-depth
-  "Demand for runners of tier with no required toolchain: replica jobs of
-  :pending runs that are :queued or whose lease expired (:queued), and those
-  with a live lease (:leased). Small, so a scaler can poll it cheaply."
-  [state now tier]
+  "Demand for runners of tier: replica jobs of :pending runs that are :queued
+  or whose lease expired (:queued), and those with a live lease (:leased).
+  Without toolchain, only runs that need no toolchain; with one (AWAI-3834,
+  e.g. :android-v1 for the APK pool), only runs that need exactly it. Small,
+  so a scaler can poll it cheaply."
+  [state now tier & [toolchain]]
   (let [runs (:runs state)
         open (for [j (vals (:jobs state))
                    :let [r (get runs (:run-id j))]
                    :when (and (= :pending (:status r))
                               (= tier (get-in r [:pipeline :tier] :t2))
-                              (nil? (get-in r [:pipeline :toolchain])))]
+                              (= toolchain (get-in r [:pipeline :toolchain])))]
                (cond (= :queued (:status j)) :queued
                      (and (= :leased (:status j)) (> (:expires j 0) now)) :leased
                      (= :leased (:status j)) :queued
                      :else nil))
         f (frequencies (remove nil? open))]
-    {:tier tier :queued (get f :queued 0) :leased (get f :leased 0)}))
+    (cond-> {:tier tier :queued (get f :queued 0) :leased (get f :leased 0)}
+      toolchain (assoc :toolchain toolchain))))
 
 (defn pending-actions [state] (outbox/pending (:outbox state)))
 

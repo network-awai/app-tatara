@@ -16,14 +16,15 @@
   (:require [clojure.edn :as edn]
             [tatara.coordinator.github :as github]
             [tatara.coordinator.http :as http]
-            [tatara.coordinator.lease :as lease]))
+            [tatara.coordinator.lease :as lease]
+            [tatara.coordinator.publish :as publish]))
 
 (defn -main [& [config-path]]
   (when-not config-path
     (binding [*out* *err*] (println "usage: bb serve CONFIG.edn")) (System/exit 64))
   (let [cfg (edn/read-string (slurp config-path))
         admin (some-> (:admin-token-env cfg) System/getenv)
-        srv (http/start! (dissoc cfg :admin-token-env :github :run-ttl-ms :snapshot-retention-ms) {:admin-token admin})
+        srv (http/start! (dissoc cfg :admin-token-env :github :run-ttl-ms :snapshot-retention-ms :publish) {:admin-token admin})
         gh (when-let [g (:github cfg)]
              (let [g (merge {:api "https://api.github.com"} g)]
                (if-let [l (:lease g)]
@@ -39,6 +40,22 @@
              (assoc-in gh [:merge :token-fn] (lease/token-provider (assoc ml :identity (lease/read-identity (:identity ml)))))
              gh)]
     (when gh (github/start-loops! srv gh) (println "github: polling" (count (:repos gh)) "repos"))
+    ;; Artifact publication to B2 (AWAI-3834): :publish {:b2 {:bucket "..." :key-id-file "/secrets/b2/key-id"
+    ;; :key-file "/secrets/b2/application-key" :link-ttl-s 604800} :interval-ms 30000}. The key files are
+    ;; read here and kept in memory only.
+    (when-let [b (get-in cfg [:publish :b2])]
+      (let [b2cfg (assoc b :key-id (clojure.string/trim (slurp (:key-id-file b)))
+                           :key (clojure.string/trim (slurp (:key-file b))))
+            session (publish/session-provider b2cfg)
+            interval (long (get-in cfg [:publish :interval-ms] 30000))]
+        (doto (Thread. ^Runnable (fn [] (loop []
+                                          (try (doseq [r (publish/publish-once srv b2cfg session)]
+                                                 (println "publish" (pr-str r)))
+                                               (catch Exception e (println "publish failed" (ex-message e))))
+                                          (Thread/sleep interval) (recur)))
+                       "tatara-publish")
+          (.setDaemon true) (.start))
+        (println "publish: b2 bucket" (:bucket b))))
     ;; Close runs that stayed :pending past :run-ttl-ms (default 6 h), so lost
     ;; leases neither block a commit's status nor keep runner nodes up (AWAI-3799).
     ;; Source snapshots of closed runs are deleted after :snapshot-retention-ms
