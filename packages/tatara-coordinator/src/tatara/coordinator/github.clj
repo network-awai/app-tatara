@@ -59,17 +59,51 @@
             (for [p (:body pulls)] {:ref (str "refs/pull/" (:number p) "/head") :sha (get-in p [:head :sha])}))))
 
 (defn pipeline-at
-  "The pipeline map at sha, :absent, or throws on malformed content."
-  [gh repo sha]
-  (let [r (api gh :get (str "/repos/" repo "/contents/" pipeline-path "?ref=" sha))]
+  "The pipeline map at sha (the file at path, pipeline-path by default), :absent,
+  or throws on malformed content."
+  ([gh repo sha] (pipeline-at gh repo sha pipeline-path))
+  ([gh repo sha path]
+  (let [r (api gh :get (str "/repos/" repo "/contents/" path "?ref=" sha))]
     (cond
       (= 404 (:status r)) :absent
       (not= 200 (:status r)) (throw (ex-info "pipeline not readable" {:repo repo :sha sha :status (:status r)}))
       :else (let [raw (.decode (Base64/getMimeDecoder) ^String (get-in r [:body :content]))]
-              (when (> (count raw) max-pipeline-bytes) (throw (ex-info "pipeline too large" {:repo repo :sha sha})))
+              (when (> (count raw) max-pipeline-bytes) (throw (ex-info "pipeline too large" {:repo repo :sha sha :path path})))
               (let [p (edn/read-string (String. raw "UTF-8"))]
-                (when-not (map? p) (throw (ex-info "pipeline is not a map" {:repo repo :sha sha})))
-                p)))))
+                (when-not (map? p) (throw (ex-info "pipeline is not a map" {:repo repo :sha sha :path path})))
+                p))))))
+
+(def max-pipelines
+  "How many pipeline files one repo may run per commit (AWAI-3897). Extra files
+  beyond the cap, in name order, are ignored."
+  4)
+
+(defn pipeline-paths-at
+  "The pipeline file paths carried at sha: .tatara/pipeline.edn plus any
+  .tatara/pipeline-<name>.edn beside it (AWAI-3897), sorted by name and capped.
+  [] when the commit carries no .tatara directory."
+  [gh repo sha]
+  (let [r (api gh :get (str "/repos/" repo "/contents/.tatara?ref=" sha))]
+    (cond
+      (= 404 (:status r)) []
+      (not= 200 (:status r)) (throw (ex-info "pipeline directory not readable" {:repo repo :sha sha :status (:status r)}))
+      :else (->> (:body r)
+                 (filter #(= "file" (:type %)))
+                 (map :name)
+                 (filter #(or (= "pipeline.edn" %) (re-matches #"pipeline-[a-z0-9][a-z0-9-]*\.edn" %)))
+                 sort
+                 (take max-pipelines)
+                 (mapv #(str ".tatara/" %))))))
+
+(defn pipelines-at
+  "Every pipeline at sha as {path pipeline}, in path order. {} when the commit
+  carries none. Throws on unreadable or malformed content, like pipeline-at."
+  [gh repo sha]
+  (into (sorted-map)
+        (for [path (pipeline-paths-at gh repo sha)
+              :let [p (pipeline-at gh repo sha path)]
+              :when (not= :absent p)]
+          [path p])))
 
 (defn snapshot!
   "Fetch the commit tarball once and admit it to the CAS. Runners download it
@@ -104,45 +138,59 @@
          (select-keys (ex-data e) [:status :bytes])))
 
 (defn- poll-head
-  "trusted: a delay of the pipeline at the default branch head (or :absent).
-  A head opts in by carrying .tatara/pipeline.edn, but what runs is always the
-  trusted pipeline, never the head's own file: a PR cannot change its
-  steps, :network, :tier or toolchain by editing .tatara/pipeline.edn
-  (AWAI-3799). A PR's own pipeline file takes effect once it is merged."
+  "trusted: a delay of {path pipeline} at the default branch head ({} = none).
+  A head opts in per pipeline file it carries (.tatara/pipeline.edn, plus any
+  .tatara/pipeline-<name>.edn, AWAI-3897), but what runs is always the trusted
+  pipeline of the same path, never the head's own file: a PR cannot change its
+  steps, :network, :tier or toolchain by editing a pipeline file
+  (AWAI-3799). A PR's own pipeline file takes effect once it is merged, and a
+  pipeline that exists only on the PR does not run yet. One result per pipeline
+  submitted; a head with no pipeline at all yields one :no-pipeline result.
+  The commit snapshot is fetched once, however many pipelines run on it."
   [server gh seen repo trusted {:keys [ref sha]}]
-  (let [key [repo sha]
-        result {:repo repo :sha sha}]
-    (try
-      (let [pipeline (if (= :absent (pipeline-at gh repo sha)) :absent @trusted)
-            reply (if (= :absent pipeline)
-                    :no-pipeline
-                    (srv/submit! server
-                                 {:event {:forge "github" :repo repo :ref ref :sha sha
-                                          :pipeline-cid (c/cid crypto/ctx pipeline)}
-                                  :pipeline pipeline
-                                  :snapshot (try (snapshot! server gh repo sha)
-                                                 (catch Exception e
-                                                   (unless-interrupt e)
-                                                   (throw (ex-info "snapshot failed"
-                                                                   (failure :snapshot e) e))))}))]
-        (when (or (= :no-pipeline reply) (:run-id reply))
-          (swap! seen conj key))
-        (assoc result :reply reply))
-      (catch Exception e
-        (unless-interrupt e)
-        (assoc result :error (if (= :snapshot (:phase (ex-data e)))
-                               (ex-data e)
-                               (failure :admission e)))))))
+  (try
+    (let [paths (vec (filter #(contains? @trusted %)
+                             (keys (pipelines-at gh repo sha))))
+          pending (remove #(contains? @seen [repo sha %]) paths)]
+      (if (empty? paths)
+        (if (contains? @seen [repo sha :none])
+          []
+          (do (swap! seen conj [repo sha :none])
+              [{:repo repo :sha sha :reply :no-pipeline}]))
+        (let [snapshot (delay (snapshot! server gh repo sha))]
+          (mapv (fn [path]
+                  (try
+                    (let [pipeline (get @trusted path)
+                          reply (srv/submit! server
+                                             {:event {:forge "github" :repo repo :ref ref :sha sha
+                                                      :pipeline-cid (c/cid crypto/ctx pipeline)}
+                                              :pipeline pipeline
+                                              :snapshot (try @snapshot
+                                                             (catch Exception e
+                                                               (unless-interrupt e)
+                                                               (throw (ex-info "snapshot failed"
+                                                                               (failure :snapshot e) e))))})]
+                      (when (:run-id reply) (swap! seen conj [repo sha path]))
+                      {:repo repo :sha sha :pipeline path :reply reply})
+                    (catch Exception e
+                      (unless-interrupt e)
+                      {:repo repo :sha sha :pipeline path
+                       :error (if (= :snapshot (:phase (ex-data e)))
+                                (ex-data e)
+                                (failure :admission e))})))
+                pending))))
+    (catch Exception e
+      (unless-interrupt e)
+      [{:repo repo :sha sha :error (failure :admission e)}])))
 
 (defn- poll-repo [server gh seen repo]
   (try
     (let [hs (heads gh repo)
           main-sha (some #(when (re-find #"^refs/heads/" (:ref %)) (:sha %)) hs)
           ;; No readable default branch head: nothing is trusted, nothing runs.
-          trusted (delay (if main-sha (pipeline-at gh repo main-sha) :absent))]
-      (vec (for [{:keys [sha] :as head} hs
-                 :when (and sha (not (contains? @seen [repo sha])))]
-             (poll-head server gh seen repo trusted head))))
+          trusted (delay (if main-sha (pipelines-at gh repo main-sha) {}))]
+      (into [] (mapcat #(poll-head server gh seen repo trusted %))
+            (filter :sha hs)))
     (catch Exception e
       (unless-interrupt e)
       [{:repo repo :error (failure :heads e)}])))
@@ -199,19 +247,26 @@
 (def default-merge-label "tatara:merge")
 
 (defn sha-verdict
-  "What this coordinator decided for repo@sha: :passed when at least one run
-  reached quorum on a passed verdict and none failed or hard-errored; :failed
-  when any run failed or hard-errored; :pending when runs exist but none
-  finished; :unknown when there is no run."
+  "What this coordinator decided for repo@sha, per pipeline (AWAI-3897 runs are
+  grouped by :pipeline-cid): :passed when every pipeline that ran reached
+  quorum on a passed verdict; :failed when any pipeline failed or
+  hard-errored; :pending when runs exist but some pipeline has not passed
+  yet; :unknown when there is no run. With a single pipeline this is exactly
+  the previous rule."
   [state repo sha]
   (let [runs (filter #(and (= repo (:repo %)) (= sha (:sha %))) (vals (:runs state)))
         result (fn [r] (when (= :reached (:status r))
                          (let [vc (get-in r [:outcome :verdict-cid])]
-                           (some #(when (= vc (:verdict-cid %)) (:result %)) (:entries r)))))]
+                           (some #(when (= vc (:verdict-cid %)) (:result %)) (:entries r)))))
+        failed-run? #(or (= :hard-error (:status %)) (and (= :reached (:status %)) (not= :passed (result %))))
+        group-verdict (fn [rs] (cond (some failed-run? rs) :failed
+                                     (some #(= :passed (result %)) rs) :passed
+                                     :else :pending))
+        verdicts (map group-verdict (vals (group-by :pipeline-cid runs)))]
     (cond
       (empty? runs) :unknown
-      (some #(or (= :hard-error (:status %)) (and (= :reached (:status %)) (not= :passed (result %)))) runs) :failed
-      (some #(= :passed (result %)) runs) :passed
+      (some #(= :failed %) verdicts) :failed
+      (every? #(= :passed %) verdicts) :passed
       :else :pending)))
 
 (defn merge-once
