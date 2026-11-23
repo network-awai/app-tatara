@@ -28,11 +28,18 @@
                     (= uri (str "/repos/" repo "/commits/main")) (ok {:sha "main-sha"})
                     (= uri (str "/repos/" repo "/pulls")) (ok [{:number 7 :head {:sha "pr-sha"}}
                                                               {:number 8 :head {:sha "no-pipeline-sha"}}])
-                    (= uri (str "/repos/" repo "/contents/.tatara/pipeline.edn"))
-                    (let [sha (second (re-find #"ref=([^&]+)" (or query-string "")))]
-                      (if-let [t (get files sha)]
-                        (ok {:content (.encodeToString (Base64/getMimeEncoder) (.getBytes ^String t "UTF-8"))})
-                        {:status 404 :body "{}"}))
+                    (str/starts-with? uri (str "/repos/" repo "/contents/.tatara"))
+                    (let [sha (second (re-find #"ref=([^&]+)" (or query-string "")))
+                          at (get files sha)
+                          by-path (cond (string? at) {".tatara/pipeline.edn" at} (map? at) at :else {})]
+                      (if (= uri (str "/repos/" repo "/contents/.tatara"))
+                        (if (seq by-path)
+                          (ok (mapv (fn [[p _]] {:name (last (str/split p #"/")) :type "file"}) by-path))
+                          {:status 404 :body "{}"})
+                        (let [path (subs uri (count (str "/repos/" repo "/contents/")))]
+                          (if-let [t (get by-path path)]
+                            (ok {:content (.encodeToString (Base64/getMimeEncoder) (.getBytes ^String t "UTF-8"))})
+                            {:status 404 :body "{}"}))))
                     (str/starts-with? uri (str "/repos/" repo "/tarball/"))
                     {:status 200 :headers {"content-type" "application/gzip"}
                      :body (str "tarball of " (last (str/split uri #"/")))}
@@ -129,7 +136,7 @@
                                       [{:ref "refs/heads/main" :sha "first"}
                                        {:ref "refs/pull/1/head" :sha "second"}]
                                       [{:ref "refs/heads/main" :sha "other"}]))
-                  gh/pipeline-at (constantly e2e/pipeline)
+                  gh/pipelines-at (constantly {gh/pipeline-path e2e/pipeline})
                   gh/snapshot! (fn [_ _ _ sha]
                                  (when (and (= "first" sha) (compare-and-set! stalled? true false))
                                    (throw (HttpTimeoutException. "test snapshot timeout"))))
@@ -139,7 +146,7 @@
       (let [results (gh/poll-once server g seen)]
         (is (= :snapshot (get-in (first results) [:error :phase])))
         (is (= ["second" "other"] @submitted))
-        (is (not (contains? @seen [repo "first"]))))
+        (is (not (contains? @seen [repo "first" gh/pipeline-path]))))
       (gh/poll-once server g seen)
       (is (= ["second" "other" "first"] @submitted))
       (is (empty? (gh/poll-once server g seen))))))
@@ -154,7 +161,7 @@
                             (if (= stalled-repo r)
                               (do (deliver entered true) @release [])
                               [{:ref "refs/heads/main" :sha "main-sha"} {:ref "refs/pull/7/head" :sha "pr-sha"}]))
-                  gh/pipeline-at (constantly e2e/pipeline)
+                  gh/pipelines-at (constantly {gh/pipeline-path e2e/pipeline})
                   gh/snapshot! (constantly nil)
                   srv/submit! (fn [_ data] (when (= "pr-sha" (get-in data [:event :sha])) (deliver admitted (:event data))) {:run-id "test"})
                   gh/deliver-once (fn [_ _] (deliver delivered true) [])]
@@ -274,7 +281,7 @@
           submitted (atom [])]
       (with-redefs [gh/heads (fn [_ _] [{:ref "refs/heads/main" :sha "main-sha"}
                                         {:ref "refs/pull/9/head" :sha "evil-sha"}])
-                    gh/pipeline-at (fn [_ _ sha] (if (= "evil-sha" sha) evil e2e/pipeline))
+                    gh/pipelines-at (fn [_ _ sha] {gh/pipeline-path (if (= "evil-sha" sha) evil e2e/pipeline)})
                     gh/snapshot! (constantly nil)
                     srv/submit! (fn [_ body] (swap! submitted conj body) {:run-id (get-in body [:event :sha])})]
         (gh/poll-once {} {:repos [repo]} (atom #{}))
@@ -284,11 +291,37 @@
   (testing "without a readable default branch head nothing runs"
     (let [submitted (atom [])]
       (with-redefs [gh/heads (fn [_ _] [{:ref "refs/pull/9/head" :sha "pr-only"}])
-                    gh/pipeline-at (constantly e2e/pipeline)
+                    gh/pipelines-at (constantly {gh/pipeline-path e2e/pipeline})
                     gh/snapshot! (constantly nil)
                     srv/submit! (fn [_ body] (swap! submitted conj body) {:run-id "x"})]
         (is (= [:no-pipeline] (mapv :reply (gh/poll-once {} {:repos [repo]} (atom #{})))))
         (is (empty? @submitted))))))
+
+(deftest named-pipelines-run-beside-the-default-one
+  (testing "each trusted pipeline file a head carries becomes its own run (AWAI-3897)"
+    (let [android (assoc e2e/pipeline :toolchain :android-v1 :status-context "tatara/android")
+          at {gh/pipeline-path e2e/pipeline ".tatara/pipeline-android.edn" android}
+          submitted (atom []) snapshots (atom []) seen (atom #{})]
+      (with-redefs [gh/heads (fn [_ _] [{:ref "refs/heads/main" :sha "main-sha"}
+                                        {:ref "refs/pull/9/head" :sha "pr-sha"}])
+                    gh/pipelines-at (fn [_ _ sha] (if (= "pr-sha" sha)
+                                                    (assoc at ".tatara/pipeline-new.edn" (assoc android :steps [["curl" "http://100.100.100.100"]]))
+                                                    at))
+                    gh/snapshot! (fn [_ _ _ sha] (swap! snapshots conj sha) nil)
+                    srv/submit! (fn [_ body] (swap! submitted conj body) {:run-id (str (get-in body [:event :sha]) "/" (get-in body [:event :pipeline-cid]))})]
+        (gh/poll-once {} {:repos [repo]} seen)
+        (is (= 4 (count @submitted)) "two pipelines on each of main and the PR head")
+        (is (= #{"main-sha" "pr-sha"} (set @snapshots)) "one snapshot per commit, not per pipeline")
+        (is (= 2 (count (distinct (map #(get-in % [:event :pipeline-cid]) @submitted)))))
+        (is (every? #(contains? #{e2e/pipeline android} (:pipeline %)) @submitted)
+            "the PR runs main's pipelines; a pipeline that exists only on the PR does not run yet")
+        (is (empty? (gh/poll-once {} {:repos [repo]} seen)) "a second poll does not resubmit"))))
+  (testing "the merge gate waits for every pipeline, not any one of them"
+    (let [by-cid (fn [sha cid status result] (assoc (run-of sha status result) :pipeline-cid cid))
+          both {"a" (by-cid "y" "cid-a" :reached :passed) "b" (by-cid "y" "cid-b" :reached :passed)}]
+      (is (= :passed (gh/sha-verdict {:runs both} repo "y")))
+      (is (= :pending (gh/sha-verdict {:runs (assoc both "b" {:repo repo :sha "y" :pipeline-cid "cid-b" :status :pending :entries []})} repo "y")))
+      (is (= :failed (gh/sha-verdict {:runs (assoc both "b" (by-cid "y" "cid-b" :reached :failed))} repo "y"))))))
 
 (deftest an-interrupt-inside-a-tick-stops-the-worker
   (testing "workers stop even when interrupted in the middle of a blocking call (AWAI-3820)"
