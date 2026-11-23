@@ -74,7 +74,7 @@ data:
      :fetch {:proxy "$PROXY"}
      :cache {:root "/cache/build" :salt "$(basename "$TC")" :keep 2
              :envs ["CARGO_HOME" "CARGO_TARGET_DIR" "GRADLE_USER_HOME" "npm_config_cache"]}
-     :env {"PATH" "$TC/node/bin:$TC/rust/bin:$TC/jdk/bin:/opt/shim:/usr/local/bin:/usr/bin:/bin"
+     :env {"PATH" "$TC/cmake/bin:$TC/node/bin:$TC/rust/bin:$TC/jdk/bin:/opt/shim:/usr/local/bin:/usr/bin:/bin"
            "JAVA_HOME" "$TC/jdk"
            "ANDROID_HOME" "$TC/sdk" "ANDROID_SDK_ROOT" "$TC/sdk"
            "NDK_HOME" "$TC/sdk/ndk/27.0.12077973"

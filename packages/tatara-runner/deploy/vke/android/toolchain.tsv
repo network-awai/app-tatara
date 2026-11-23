@@ -20,3 +20,4 @@ build-tools-36.0	36.0.0	sdk	build-tools;36.0.0	sha1	b0b6376977657e8ad9b969bacf40
 platform-37.0	2	sdk	platforms;android-37.0	sha1	ed8ebf7f8822a4de5686d427f237d2fa30ff7410
 platform-36	2	sdk	platforms;android-36	sha1	2c1a80dd4d9f7d0e6dd336ec603d9b5c55a6f576
 ndk	27.0.12077973	sdk	ndk;27.0.12077973	sha1	5e5cd517bdb98d7e0faf2c494a3041291e71bdcc
+cmake	3.31.6	tar	https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-x86_64.tar.gz	sha256	5a1133ff103c71eb5120e2cc3de922733e7d8a26a98ae716397e8676adb367bf

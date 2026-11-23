@@ -21,7 +21,7 @@ tree() { # sha256 of a directory: every file's sha256 and every symlink target, 
 components() { grep -v '^#' "$tsv" | awk -F'\t' 'NF>=6 && $3!="oci" {print $1}'; }
 where() { # install path of component $1, relative to $dir
   case "$1" in
-    jdk) echo jdk ;; node) echo node ;;
+    jdk) echo jdk ;; node) echo node ;; cmake) echo cmake ;;
     rustc|cargo|rust-std-*) echo "rust/.parts/$1" ;;
     cmdline-tools) echo sdk/cmdline-tools/latest ;;
     *) grep -v '^#' "$tsv" | awk -F'\t' -v n="$1" '$1==n {print $4}' | sed 's|;|/|g; s|^|sdk/|' ;;
