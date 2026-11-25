@@ -14,9 +14,10 @@ repo は公開なので、実際のアドレスはこの文書に書かない。
 2. tailnet（Tailscale。上の private 範囲のうち、実行時にホストの経路表で tailnet 側として見えた範囲。VM のホスト mini や他 mini のアドレスは実行時に拾う）
 3. ホスト（VM の外。Lima VM のホスト mini と、VM のデフォルトゲートウェイ経由の外部）
 4. クラウドのメタデータ（リンクローカルのメタデータ endpoint。標準の endpoint 名とアドレスは実行時に決め、fleet の実アドレスは書かない。Lima では通常届かないが、将来の移行先で漏れる経路を塞ぐ）
-5. job の利用者から `sudo` を奪った状態（`:step-user` に落とした後も、特権を取り戻せないこと）
-6. `:step-user` を使わない VM の構成（`deploy/runner.example.edn`）で、job の利用者に passwordless sudo がある場合（奪ってから runner を動かす。前提条件。§2）
-7. `:network :fetch` の step（`unshare` を使わない構成。LAN・tailnet・ホストに届かないこと）
+5. loopback（対照。step 内の test server 用。`wrap-network` が namespace 内で `ip link set lo up` する）
+6. job の利用者から `sudo` を奪った状態（`:step-user` に落とした後も、特権を取り戻せないこと）
+7. `:step-user` を使わない VM の構成（`deploy/runner.example.edn`）で、job の利用者に passwordless sudo がある場合（奪ってから runner を動かす。前提条件。§2）
+8. `:network :fetch` の step（`unshare` を使わない構成。LAN・tailnet・ホストに届かないこと）
 
 なお、loopback だけは使える（step 内の test server 用。`wrap-network` が namespace 内で `ip link set lo up` する）。
 
@@ -36,9 +37,9 @@ repo は公開なので、実際のアドレスはこの文書に書かない。
 
 ## 3.1 preflight が守らない範囲
 
-`preflight-network` は、`:network-enforcement :unshare` の構成で `:network :none` の step が使う `unshare` の形だけを試す。次は**守らない**。この試験でも別に確かめる（§4 の #7 が :fetch、#1〜#4 が guest の内側）。
+`preflight-network` は、`:network-enforcement :unshare` の構成で `:network :none` の step が使う `unshare` の形だけを試す。次は**守らない**。この試験でも別に確かめる（§4 の #8 が :fetch、#1〜#4 が guest の内側）。
 
-- `:network :fetch` の step: `unshare` を使わない（egress proxy 経由）。preflight は何も試さない。`:fetch` から LAN・tailnet・ホストに届かないことは、§4 #7 で確かめる（proxy 経由の取得は対照として成功すること）。
+- `:network :fetch` の step: `unshare` を使わない（egress proxy 経由）。preflight は何も試さない。`:fetch` から LAN・tailnet・ホストに届かないことは、§4 #8 で確かめる（proxy 経由の取得は対照として成功すること）。
 - `:network-enforcement` を設定しない構成: preflight は no-op で、job は隔離なしで動く。この試験の対象外（起動は従来どおり通ることだけ §3-3 で確かめる）。
 - guest の外（ホスト側の pf）: mini の macOS 側 firewall 等は preflight の範囲外。この試験は step の利用者から見た guest の内側だけを確かめる。ホスト側の制御は owner の作業であり、別途確かめる。
 
