@@ -14,6 +14,13 @@
   (let [cfg (edn/read-string (slurp config-path))
         id (crypto/read-identity (:identity cfg))
         c (cl/client (:coordinator cfg) id)]
+    (let [pf (core/preflight-network cfg)]
+      (when-not (:ok pf)
+        (binding [*out* *err*]
+          (println "tatara-runner: refusing to start: network-enforcement :unshare is unavailable on this host; no jobs will be accepted")
+          (println "  probe argv:" (pr-str (:argv pf)))
+          (println "  exit:" (:exit pf) "stderr:" (:err pf)))
+        (System/exit 1)))
     (println "tatara-runner" (:did id) "->" (:coordinator cfg)
              "enforcement" (:network-enforcement cfg))
     (loop []

@@ -108,6 +108,39 @@
   (testing ":fetch and :none without enforcement are not wrapped"
     (is (= ["bb" "ci"] (core/wrap-network ["bb" "ci"] :fetch :unshare)))
     (is (= ["bb" "ci"] (core/wrap-network ["bb" "ci"] :none :none)))))
+(deftest network-enforcement-preflight
+  (testing "with :network-enforcement :unshare, the real wrap-network shape is probed once"
+    (let [seen (atom nil)
+          probe (fn [argv] (reset! seen argv) {:exit 0})
+          r (core/preflight-network {:network-enforcement :unshare} probe)]
+      (is (= {:ok true} r))
+      (is (= (core/wrap-network ["true"] :none :unshare nil) @seen))
+      (is (= ["unshare" "--net" "--map-root-user" "--"] (subvec @seen 0 4)))))
+  (testing "a failed probe (e.g. EPERM in a Lima VM) refuses to start"
+    (let [r (core/preflight-network {:network-enforcement :unshare}
+                (fn [_] {:exit 1 :err "unshare: unshare failed: Operation not permitted"}))]
+      (is (false? (:ok r)))
+      (is (= :network-enforcement-unavailable (:reason r)))
+      (is (= 1 (:exit r)))
+      (is (re-find #"Operation not permitted" (:err r)))))
+  (testing "a probe that throws (unshare missing) also refuses to start"
+    (let [r (core/preflight-network {:network-enforcement :unshare}
+                (fn [_] (throw (ex-info "cannot exec" {}))))]
+      (is (false? (:ok r)))
+      (is (= :network-enforcement-unavailable (:reason r)))))
+  (testing "with a step-user, the probed shape is the step shape (setpriv then unshare)"
+    (let [seen (atom nil)
+          r (core/preflight-network {:network-enforcement :unshare :step-user {:uid 20000 :gid 20000}}
+                (fn [argv] (reset! seen argv) {:exit 0}))]
+      (is (= {:ok true} r))
+      (is (= (core/wrap-network ["true"] :none :unshare {:uid 20000 :gid 20000}) @seen))
+      (is (= "setpriv" (first @seen)))))
+  (testing "without :network-enforcement the probe never runs and the config keeps its old meaning"
+    (doseq [cfg [{} {:network-enforcement :none}]]
+      (let [called (atom false)
+            r (core/preflight-network cfg (fn [_] (reset! called true) {:exit 1}))]
+        (is (= {:ok true} r))
+        (is (false? @called))))))
 
 (deftest steps-drop-to-the-step-user
   (let [u {:uid 20000 :gid 20000}]
