@@ -9,7 +9,7 @@ T2 tier の runner（各 Mac mini の Linux VM の中で動く）。設計: `doc
 1. coordinator から lease を取る（runner の Ed25519 署名）。
 2. source の snapshot（coordinator が GitHub から取得した tarball）を、lease で認証して coordinator から受け取る。sha256 を確かめる。GitHub の token は runner に渡らない。
 3. 展開した tree の `.tatara/pipeline.edn` が、lease された pipeline CID と一致するかを確かめる。一致しなければ実行しない。
-4. step を argv のまま順に実行する。最初の非 0 終了か、`:timeout-seconds` で止める。`:network :none` の step は、`:network-enforcement :unshare` のとき新しい network namespace（`unshare --net`）で実行する。
+4. step を argv のまま順に実行する。最初の非 0 終了か、`:timeout-seconds` で止める。`:network :none` の step は、`:network-enforcement :unshare` のとき新しい network namespace（`unshare --net`）で実行する。起動時にその形の `unshare` を 1 回試し（`preflight-network`）、失敗したら理由を示して終了し、job を受けない。`:network-enforcement` を使わない構成は従来どおり（probe なし）。
 5. 宣言された artifact だけをホストが読み、blob と記述子を CAS に上げる。
 6. verdict（source、pipeline、結果、artifact の CID だけ）と、receipt（各 step の exit・時間、log の sha256、使ったネットワークの強制方法）、snapshot を上げ、署名して完了する。
 

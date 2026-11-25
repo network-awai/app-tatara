@@ -89,6 +89,31 @@
                   step-user)
        :else (into (into ["unshare" "--net" "--map-root-user" "--"] lo) argv)))))
 
+(def ^:dynamic *probe-fn*
+  "Runs the preflight probe argv, returning {:exit n :err s}. Dynamic so tests
+  can substitute a fake instead of depending on the real unshare binary."
+  (fn [argv] (apply p/shell {:out :string :err :string :continue true} argv)))
+
+(defn preflight-network
+  "Probe, at startup, the exact wrap-network shape a :network :none step would
+  use, so a host where unshare cannot create a namespace (e.g. EPERM in a Lima
+  VM) fails here instead of accepting jobs it cannot isolate. Only
+  :network-enforcement :unshare requires the probe; any other config keeps its
+  old meaning and never runs it. probe-fn is injectable for tests.
+  Returns {:ok true} or {:ok false :reason :network-enforcement-unavailable
+  :argv [...] :exit n :err s}."
+  ([cfg] (preflight-network cfg nil))
+  ([{:keys [network-enforcement step-user]} probe-fn]
+   (if (not= :unshare network-enforcement)
+     {:ok true}
+     (let [argv (wrap-network ["true"] :none :unshare step-user)
+           r (try ((or probe-fn *probe-fn*) argv)
+                  (catch Exception e {:exit -1 :err (.getMessage e)}))]
+       (if (and (map? r) (zero? (:exit r)))
+         {:ok true}
+         {:ok false :reason :network-enforcement-unavailable :argv argv
+          :exit (:exit r) :err (:err r)})))))
+
 (defn fetch-env
   "Environment for a :fetch step: all HTTP(S) through the egress proxy."
   [{:keys [fetch]} network]
